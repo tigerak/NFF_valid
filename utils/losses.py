@@ -1,0 +1,122 @@
+import torch 
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.nn.functional import cross_entropy
+
+
+
+def criterion(outputs, targets):
+    return nn.CrossEntropyLoss()(outputs, targets)
+
+
+## class 별로 
+def focal_loss(logits, targets, alpha=0.25, gamma=2.0, reduction='mean'):
+    ce_loss = F.cross_entropy(logits, targets, reduction='none')
+    pt = torch.exp(-ce_loss)  # 확률 변환
+    
+    if alpha is None:
+        alpha_factor = torch.ones_like(ce_loss)
+    
+    elif isinstance(alpha, (list, tuple)):
+        alpha_t = torch.tensor(alpha, dtype=logits.dtype, device=logits.device)
+        alpha_factor = alpha_t[targets]
+    elif torch.is_tensor(alpha):
+        alpha_t = alpha.to(device=logits.device, dtype=logits.dtype)
+        if alpha_t.ndim == 0:
+            alpha_factor = torch.full_like(ce_loss, float(alpha_t.item()))
+        else:
+            alpha_factor = alpha_t[targets]
+    else:
+        alpha_factor = torch.full_like(ce_loss, float(alpha))
+
+    loss = alpha_factor * (1.0 - pt).pow(gamma) * ce_loss
+
+    if reduction == 'sum':
+        return loss.sum()
+    if reduction == 'none':
+        return loss
+    return loss.mean()
+
+def loss_dynamic(outputs, targets, special_class=4, special_weight=2.0, current_epoch=0, total_epochs=100):
+    base_loss = nn.CrossEntropyLoss()(outputs, targets)
+    
+    # special_class가 int 인 경우와 list/tuple 인 경우를 구분
+    if isinstance(special_class, int):
+        special_mask = (targets == special_class)
+    else:
+    
+        special_mask = torch.isin(targets, torch.tensor(special_class).to(targets.device))
+        
+        # 또는 for loop를 사용하여 mask 생성
+        # special_mask = torch.zeros_like(targets, dtype=torch.bool)
+        # for sc in special_class:
+        #     special_mask |= (targets == sc)
+    
+    if special_mask.sum() > 0:
+        spec_loss = nn.CrossEntropyLoss()(outputs[special_mask], targets[special_mask])
+        epoch_factor = current_epoch / total_epochs
+        special_weight = special_weight * epoch_factor
+        base_loss += special_weight * spec_loss
+
+    return base_loss
+
+def calculate_loss_per_class(class_losses, loss_fn, logits, labels):
+
+    """각 클래스별로 손실값을 계산"""
+    batch_size = labels.shape[0]
+    
+    for i in range(batch_size):
+        class_idx = labels[i].item()  # 현재 샘플의 클래스 인덱스
+        loss = loss_fn(logits[i].unsqueeze(0), labels[i].unsqueeze(0))
+        class_losses[class_idx].append(loss.item()) 
+    
+    for class_idx, losses in class_losses.items():
+        if len(losses) > 0:
+            avg_loss = sum(losses) / len(losses)
+        else:
+            avg_loss = 0.0 
+
+
+class SupConLoss(nn.Module):
+    def __init__(self, temperature=0.07):
+        super().__init__()
+        self.temperature = temperature
+
+    def forward(self, features, labels):
+
+        device = features.device
+        B = labels.shape[0]
+        if features.shape[0] != 2 * B:
+            raise ValueError("features should be 2*B in first dim when labels length is B")
+
+        # normalize already done upstream, but ensure:
+        features = F.normalize(features, dim=1)
+
+        # create labels for 2*B: duplicate labels for each view
+        labels = labels.repeat(2)  # [2*B]
+
+        # similarity matrix
+        sim = torch.div(torch.matmul(features, features.T), self.temperature)  # [2B,2B]
+
+        # mask to remove self-comparisons
+        mask = torch.eye(2*B, dtype=torch.bool, device=device)
+        sim_masked = sim.masked_fill(mask, -1e9)  # or large negative
+
+        # create positive mask: positive if same label and not same index
+        labels_eq = labels.unsqueeze(0) == labels.unsqueeze(1)  # [2B,2B]
+        positives_mask = labels_eq & ~mask  # exclude self
+
+        # For each anchor i, compute log_prob of positives among all non-self
+        exp_sim = torch.exp(sim_masked)
+        exp_sim_sum = exp_sim.sum(dim=1, keepdim=True)  # denom
+
+        # sum of positives exp
+        pos_exp_sum = (exp_sim * positives_mask.float()).sum(dim=1)
+
+        # avoid zero positives (happens if class appears only once in batch) -> exclude those anchors from loss
+        non_zero_pos = pos_exp_sum > 0
+        # compute loss only for anchors that have positives
+        loss = -torch.log( (pos_exp_sum[non_zero_pos] / exp_sim_sum[non_zero_pos].squeeze(1)) + 1e-12 )
+        if loss.numel() == 0:
+            return torch.tensor(0.0, device=device, requires_grad=True)
+        return loss.mean()

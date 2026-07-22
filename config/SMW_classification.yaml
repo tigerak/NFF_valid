@@ -1,0 +1,37 @@
+train_dir: 'D:\01.Work\NFF_Inspection\Model\NFF_ModelDeveloper\dataset\SMW\TRAIN'
+test_dir: 'D:\01.Work\NFF_Inspection\Model\NFF_ModelDeveloper\dataset\SMW\TEST'
+save_dir: 'D:\01.Work\NFF_Inspection\Model\NFF_ModelDeveloper\models\save'
+project_name : 'SMW_260622_AZ_class5'
+model_name : 'tiny_vit_21m_224' ## TIMM type
+pretrained : 'tinyvit_21m_224.pth' 
+head_type : 'linear'  # transformer | linear | general_gem | effnet_gem | backbone
+freeze_backbone : True
+finetuning : False ## True, False
+finetuning_weight : 'f1_score0.9924_Loss0.0028340_epoch13.pth'
+n_classes: 5
+img_size: [224, 224]
+labels : ['NG_NO',  'NG_PINHOLE', 'NG_SPATTER', 'OK', "OK_OVERLAP"]
+valid_ratio : 0.1
+datasets_name : "SMW"
+batch_size : 36
+accumulation_steps : 1
+focal_gamma: 2.0
+focal_alpha: [1.0, 1.0, 1.0, 1.0, 1.0]
+
+
+## model_name
+# convnextv2_base.fcmae_ft_in22k_in1k
+# tf_efficientnetv2_m.in21k
+# tiny_vit_21m_224
+# yolov8x_cls
+
+## datasets
+# FTF_FOLDING
+# SMW
+# LHS
+# FTF
+# AIA
+# SURFACE
+
+
+

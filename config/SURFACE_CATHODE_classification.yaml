@@ -1,0 +1,37 @@
+train_dir: 'D:\NFF_ModelDeveloper\IMG_DATA\SURFACE_CATHODE\latest\TRAIN'
+test_dir: 'D:\NFF_ModelDeveloper\IMG_DATA\SURFACE_CATHODE\latest\TEST'
+save_dir: 'D:\NFF_ModelDeveloper\models\save'
+project_name : 'SURFACE_CATHODE_0707'
+model_name : 'vit_small_patch14_dinov2.lvd142m' ## TIMM type
+pretrained : 'dino_small.bin' 
+head_type : 'transformer'  # transformer | linear | general_gem | effnet_gem | backbone
+freeze_backbone : True
+finetuning : False ## True, False
+finetuning_weight : 'f1_score0.9713_Loss0.0460594_epoch1.pth'
+n_classes: 4
+img_size: [518, 518]
+labels : ['CRACK_1', 'CRATER', 'DEBRIS', 'DENT']
+valid_ratio : 0.1
+datasets_name : "SURFACE_CATHODE"
+batch_size : 32
+accumulation_steps : 4
+focal_gamma: 1.0
+focal_alpha: [1.0, 1.0, 1.0, 1.0]
+
+## model_name
+# convnextv2_base.fcmae_ft_in22k_in1k
+# tf_efficientnetv2_m.in21k
+# tinyvit_21m_224
+# yolov8x_cls
+# vit_base_patch14_dinov2
+
+## datasets
+# FTF_FOLDING
+# SMW
+# LHS
+# FTF
+# AIA
+# SURFACE
+
+
+
