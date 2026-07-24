@@ -69,7 +69,14 @@ def main():
     dataloader = None
     if not is_smw_eval:
         dataset = datasets.SURFACEDataset(filenames_total, label_total, args, mode='valid')
-        dataloader = DataLoader(dataset, batch_size=args.batch_size, num_workers=2, shuffle=False, pin_memory=True)
+        dataloader = DataLoader(
+            dataset,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            shuffle=False,
+            pin_memory=True,
+            persistent_workers=(args.num_workers > 0)
+        )
 
     # 평가 설정
     cm_display_order = args.labels
