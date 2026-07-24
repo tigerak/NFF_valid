@@ -162,6 +162,9 @@ def main():
     model.to(device)
     model.eval()
 
+    alpha = torch.sigmoid(model.fusion_logit).item()
+    logger.info(f'Fusion weight (alpha): {alpha:.4f}')
+
     save_root = os.path.join(args.save_dir, args.project_name, 'analysis_attention')
     os.makedirs(save_root, exist_ok=True)
 
