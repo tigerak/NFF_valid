@@ -28,9 +28,12 @@ def run_training(
                 scheduler,
                 train_dataset,
                 valid_dataset,
-                args
+                args,
+                logger=None
                 ):
-    
+    if logger is None:
+        logger = logging.getLogger(__name__)
+        
     if torch.cuda.is_available():
         print("[INFO] Using GPU: {}\n".format(torch.cuda.get_device_name()))
     DEVICE = torch.device(args.device)
