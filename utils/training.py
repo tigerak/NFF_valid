@@ -216,6 +216,7 @@ def train_one_epoch(model, optimizer, scheduler, dataloader, device, epoch, args
             loss = losses.focal_loss(outputs, targets, alpha=focal_alpha, gamma=focal_gamma)
             # loss = custom_loss.loss_dynamic(outputs, targets, special_class=[1,4], special_weight=1.5, current_epoch=epoch, total_epochs=total_epoch)
             # loss = losses.criterion(outputs, targets)
+        # ========== Mixup/Cutmix 적용 끝 ==========
 
         loss = loss / accumulation_steps  # Gradient Accumulation: loss 스케일링
 
