@@ -2,7 +2,7 @@ train_dir: 'D:\NFF_ModelDeveloper\IMG_DATA\SURFACE_ANODE_dev\TRAIN_TEST\TRAIN'
 test_dir: 'D:\NFF_ModelDeveloper\IMG_DATA\SURFACE_ANODE_dev\TRAIN_TEST\TEST'
 save_dir: 'D:\NFF_ModelDeveloper\models\save'
 model_dir: 'D:\NFF_ModelDeveloper\models\pretrained'
-project_name : 'SURFACE_ANODE_DiNO_AttnWgt_FocalAX'
+project_name : 'SURFACE_ANODE_DiNO_0727'
 model_name : 'vit_small_patch14_dinov2.lvd142m' ## TIMM type
 pretrained : 'dino_small.bin' 
 head_type : 'transformer'  # transformer | linear | general_gem | effnet_gem | backbone
@@ -15,9 +15,11 @@ labels : ['CRACK_1', 'CRACK_2', 'CRACK_FOIL_1', 'CRACK_FOIL_2', 'CRATER_1', 'CRA
 valid_ratio : 0.1
 datasets_name : "SURFACE_ANODE"
 batch_size : 64
+num_workers : 8
 accumulation_steps : 2
 focal_gamma: 2.0
-focal_alpha: [1., 1., 1., 1., 1., 1., 1., 1., 1., 1., 1.]
+focal_alpha: [1.2, 1.2, 1.5, 1.5, 1., 1., 1., 1., 1., 1., 1.]
+attn_fusion: False
 use_mixup: False   # True
 use_cutmix: False  # 둘 중 하나만 True
 mixup_alpha: 1.0   # Beta 분포의 alpha (클수록 균등, 작을수록 극단)

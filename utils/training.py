@@ -28,9 +28,12 @@ def run_training(
                 scheduler,
                 train_dataset,
                 valid_dataset,
-                args
+                args,
+                logger=None
                 ):
-    
+    if logger is None:
+        logger = logging.getLogger(__name__)
+        
     if torch.cuda.is_available():
         print("[INFO] Using GPU: {}\n".format(torch.cuda.get_device_name()))
     DEVICE = torch.device(args.device)
@@ -63,12 +66,36 @@ def run_training(
 
         sampler = WeightedRandomSampler(weights=sample_weights, num_samples=len(sample_weights), replacement=True)
 
-        train_loader = DataLoader(train_dataset, batch_size= args.batch_size,  num_workers=8, sampler=sampler, drop_last=True,  pin_memory=True)
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            sampler=sampler,
+            drop_last=True,
+            pin_memory=True,
+            persistent_workers=(args.num_workers > 0)
+        )
     else:
-        train_loader = DataLoader(train_dataset, batch_size= args.batch_size,  num_workers=8, shuffle=True, drop_last=True,  pin_memory=True)
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            shuffle=True,
+            drop_last=True,
+            pin_memory=True,
+            persistent_workers=(args.num_workers > 0)
+        )
     # ========== WeightedRandomSampler 설정 끝 ==========
 
-    valid_loader = DataLoader(valid_dataset, batch_size = args.batch_size,  num_workers=8, shuffle=False, drop_last=False, pin_memory=True)
+    valid_loader = DataLoader(
+        valid_dataset,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        shuffle=False,
+        drop_last=False,
+        pin_memory=True,
+        persistent_workers=(args.num_workers > 0)
+    )
     # make_debug.show_image_from_loader(valid_loader, class_names=args.labels, num_batches = 20, max_images = 64)
 
     num_epochs = args.max_epoch

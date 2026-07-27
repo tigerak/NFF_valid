@@ -11,6 +11,7 @@ import torch
 from argments import argument
 from utils import get_models, datasets, schedulers, training
 from dataset import data_setup
+from evaluation.base_engine import setup_logger
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -25,6 +26,10 @@ if __name__ == '__main__':
     args = argument()
     args.load(config_path)
     DEVICE = torch.device(args.device)
+
+    logger = setup_logger('main-train', log_file=f'{args.save_dir}/{args.project_name}/train.log')
+    logger.info(f"Start training: {args.project_name}")
+    logger.info(f"Config: {args.__dict__}")
 
     ## get models (configurable head: args.head_type)
     model = get_models.build_model(args)

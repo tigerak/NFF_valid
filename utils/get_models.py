@@ -193,6 +193,7 @@ class TransformerHeadClassifier(nn.Module):
         self.embed_dim = backbone.num_features # 768
         self.num_classes = args.n_classes
         self.freeze_backbone = bool(getattr(args, 'freeze_backbone', True))
+        self.attn_fusion = bool(getattr(args, 'attn_fusion', False))
         
         # Freeze backbone parameters if requested.
         if self.freeze_backbone:
@@ -252,6 +253,26 @@ class TransformerHeadClassifier(nn.Module):
         # # patch tokens 없는 경우 처리 (ONNX export 등에서 경고 발생 가능)
         # if not torch.jit.is_tracing() and patch_tokens.shape[1] == 0:
         #     return self.classifier(cls_token)
+
+        if self.attn_fusion:
+            # 어텐션 가중치를 이용한 패치 토큰 가중 평균
+            query = self.q_proj(cls_token)  # [B, D]
+            keys = self.k_proj(patch_tokens)  # [B, N-1, D]
+            attn_weights = torch.einsum('bd, bnd -> bn', query, keys)  # [B, N-1]
+            attn_weights = torch.softmax(attn_weights / (self.embed_dim ** 0.5), dim=1)  # [B, N-1]
+
+            patch_avg = torch.einsum('bn, bnd -> bd', attn_weights, patch_tokens)  # [B, D]
+
+            alpha = torch.sigmoid(self.fusion_logit)
+            combined = alpha * cls_token + (1.0 - alpha) * patch_avg
+
+        else:
+            # 단순 평균 풀링
+            patch_avg = patch_tokens.mean(dim=1)  # [B, D] 
+            combined = cls_token + patch_avg
+
+        return self.classifier(combined)
+        
         
         # 어텐션 가중치를 이용한 패치 토큰 가중 평균
         query = self.q_proj(cls_token)  # [B, D]
