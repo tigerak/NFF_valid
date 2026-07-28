@@ -306,12 +306,17 @@ def main():
     else:
         logger.info('Fusion weight (alpha): not applicable for this token_fusion mode')
 
-    save_root = os.path.join(args.save_dir, args.project_name, 'analysis_attention')
-    os.makedirs(save_root, exist_ok=True)
+    save_root_base = os.path.join(args.save_dir, args.project_name, 'analysis_attention')
+    os.makedirs(save_root_base, exist_ok=True)
 
     # 각 CSV 파일에 대해 처리
     for csv_path in csv_files:
+        csv_name = os.path.splitext(os.path.basename(csv_path))[0]
+        save_root = os.path.join(save_root_base, csv_name)
+        os.makedirs(save_root, exist_ok=True)
+
         logger.info(f'\n========== Processing CSV: {csv_path} ==========')
+        logger.info(f'Save folder: {save_root}')
         
         eval_df = pd.read_csv(csv_path)
 
@@ -360,13 +365,12 @@ def main():
             overlay = overlay_attention(original_image, attention_map, alpha=0.5)
 
             base_name = os.path.splitext(os.path.basename(path))[0]
-            csv_name = os.path.splitext(os.path.basename(csv_path))[0]
 
-            original_name = f'{csv_name}_mismatch_{base_name}_orig.png'
+            original_name = f'mismatch_{base_name}_orig.png'
             original_path = os.path.join(save_root, original_name)
             original_image.save(original_path)
 
-            out_name = f'{csv_name}_mismatch_{base_name}_attn.png'
+            out_name = f'mismatch_{base_name}_attn.png'
             out_path = os.path.join(save_root, out_name)
             overlay.save(out_path)
             logger.info(f'Saved mismatch attention overlay: {out_path}')
@@ -408,13 +412,12 @@ def main():
             overlay = overlay_attention(original_image, attention_map, alpha=0.5)
 
             base_name = os.path.splitext(os.path.basename(path))[0]
-            csv_name = os.path.splitext(os.path.basename(csv_path))[0]
 
-            original_name = f'{csv_name}_correct_{base_name}_orig.png'
+            original_name = f'correct_{base_name}_orig.png'
             original_path = os.path.join(save_root, original_name)
             original_image.save(original_path)
 
-            out_name = f'{csv_name}_correct_{base_name}_attn.png'
+            out_name = f'correct_{base_name}_attn.png'
             out_path = os.path.join(save_root, out_name)
             overlay.save(out_path)
             logger.info(f'Saved correct attention overlay: {out_path}')
@@ -427,7 +430,6 @@ def main():
             })
 
         # CSV별 HTML 리포트 저장
-        csv_name = os.path.splitext(os.path.basename(csv_path))[0]
         report_path = os.path.join(save_root, f'analysis_report_{csv_name}.html')
         build_html_report(report_path, report_items_mismatch, report_items_correct)
         logger.info(f'Saved analysis report: {report_path}')
