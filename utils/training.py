@@ -191,7 +191,7 @@ def run_training(
         middle_time = time.time() - start
         logger.info("Middle time: {:.0f}h {:.0f}m {:.0f}s".format(
             middle_time // 3600, (middle_time % 3600) // 60, (middle_time % 3600) % 60))
-        logger.info()
+        logger.info('')
 
     end = time.time()
     time_elapsed = end - start
