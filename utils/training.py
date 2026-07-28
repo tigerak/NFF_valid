@@ -57,7 +57,7 @@ def run_training(
         logger = logging.getLogger(__name__)
         
     if torch.cuda.is_available():
-        print("[INFO] Using GPU: {}\n".format(torch.cuda.get_device_name()))
+        logger.info("[INFO] Using GPU: {}\n".format(torch.cuda.get_device_name()))
     DEVICE = torch.device(args.device)
 
     # WeightedRandomSampler 적용 
@@ -145,7 +145,7 @@ def run_training(
             current_p = 0.3 - (0.3 - 0.05) * (epoch / 50)
             if current_p < 0.05 : current_p = 0.05
             train_dataset.p = current_p
-            print(f"Current Pinhole gen Prob : {current_p}...")
+            logger.info(f"Current Pinhole gen Prob : {current_p}...")
 
         accumulation_steps = getattr(args, 'accumulation_steps', 1)
         train_epoch_loss, train_recall, train_epoch_f1, train_epoch_acc = train_one_epoch(model, optimizer, scheduler,
@@ -171,7 +171,7 @@ def run_training(
         # deep copy the model
         if best_epoch_loss > val_epoch_loss:
 
-            print(f"{b_}Validation Loss decreased ({best_epoch_loss} ---> {val_epoch_loss})")
+            logger.info(f"{b_}Validation Loss decreased ({best_epoch_loss} ---> {val_epoch_loss})")
             best_epoch_loss = val_epoch_loss
             best_model_wts = copy.deepcopy(model.state_dict())
 
@@ -179,25 +179,25 @@ def run_training(
             torch.save(model.state_dict(), PATH)
 
             # Save a model file from the current directory
-            print(f"Model Saved{sr_}")
+            logger.info(f"Model Saved{sr_}")
 
         if epoch % 3 == 0:
         
-            print(f"Model Saved{sr_}")
+            logger.info(f"Model Saved{sr_}")
             PATH = "{}/f1_score{:.4f}_Loss{:.7f}_epoch{:.0f}.pth".format(save_root, val_epoch_f1, val_epoch_loss, epoch)
 
             torch.save(model.state_dict(), PATH)
 
         middle_time = time.time() - start
-        print("Middle time: {:.0f}h {:.0f}m {:.0f}s".format(
+        logger.info("Middle time: {:.0f}h {:.0f}m {:.0f}s".format(
             middle_time // 3600, (middle_time % 3600) // 60, (middle_time % 3600) % 60))
-        print()
+        logger.info()
 
     end = time.time()
     time_elapsed = end - start
-    print('Training complete in {:.0f}h {:.0f}m {:.0f}s'.format(
+    logger.info('Training complete in {:.0f}h {:.0f}m {:.0f}s'.format(
         time_elapsed // 3600, (time_elapsed % 3600) // 60, (time_elapsed % 3600) % 60))
-    print("Best loss: {:.7f}".format(best_epoch_loss))
+    logger.info("Best loss: {:.7f}".format(best_epoch_loss))
 
     # load best model weights
     model.load_state_dict(best_model_wts)
