@@ -169,7 +169,7 @@ def main():
 
         except Exception as e:
             elapsed = time.time() - start_time
-            msg = f'[FAILED]  {project_name} — {e}'
+            msg = f'[FAILED]  {project_name} - {e}'
             schedule_logger.error(msg)
             schedule_logger.error(traceback.format_exc())
             results.append({'job': project_name, 'status': 'FAILED', 'error': str(e), 'elapsed': elapsed})
@@ -190,9 +190,9 @@ def main():
     for r in results:
         elapsed_str = f"{r['elapsed']/3600:.2f}h"
         if r['status'] == 'SUCCESS':
-            print(f"  ✅ {r['job']}  ({elapsed_str})")
+            print(f"  [OK] {r['job']}  ({elapsed_str})")
         else:
-            print(f"  ❌ {r['job']}  ({elapsed_str})  →  {r.get('error','')}")
+            print(f"  [FAIL] {r['job']}  ({elapsed_str})  ->  {r.get('error','')}")
     print('='*60)
 
     for r in results:
