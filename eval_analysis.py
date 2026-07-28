@@ -166,89 +166,83 @@ def collect_test_data(args):
 
 def compute_transformer_attention(model, image_tensor, output_size):
     """token_fusion 방식에 맞는 패치 중요도 히트맵 계산.
-    - attn : 학습된 q/k projection 어텐션 가중치 직접 사용 (forward와 동일)
-    - concat/sum : GradCAM (예측 클래스 score의 patch_tokens gradient * activation)
+    - attn / wt_concat : 학습된 q/k projection 어텐션 가중치 직접 사용 (forward와 동일)
+    - concat/sum : GradCAM — backbone 출력 patch features를 leaf 텐서로 만들어
+                   예측 클래스 score에 대한 gradient를 직접 수집
     """
     if not hasattr(model, 'backbone') or not hasattr(model, 'transformer_head'):
         raise RuntimeError('Model does not expose transformer attention internals.')
 
     token_fusion = str(getattr(model, 'token_fusion', 'sum')).lower()
-
     model.eval()
 
-    # backbone은 항상 no_grad (frozen)
+    # ── backbone forward (항상 no_grad, frozen) ──────────────────────────
     with torch.no_grad():
         features = model.backbone.forward_features(image_tensor.unsqueeze(0))
 
     if features.ndim != 3:
         raise RuntimeError(f'Expected token features [B, N, D], got {tuple(features.shape)}')
 
-    if token_fusion == 'attn' and hasattr(model, 'q_proj') and hasattr(model, 'k_proj'):
-        # ── attn 모드: forward와 동일한 연산, gradient 불필요 ──────────────
+    if token_fusion in ['attn', 'wt_concat'] and hasattr(model, 'q_proj') and hasattr(model, 'k_proj'):
+        # ── attn / wt_concat 모드: forward와 동일한 연산, gradient 불필요 ──
         with torch.no_grad():
             refined = model.transformer_head(features)
-            cls_token = refined[:, 0, :]
+            cls_token  = refined[:, 0, :]
             patch_tokens = refined[:, 1:, :]
 
             if patch_tokens.shape[1] == 0:
                 raise RuntimeError('No patch tokens found.')
 
-            q = model.q_proj(cls_token)
-            k = model.k_proj(patch_tokens)
+            q    = model.q_proj(cls_token)
+            k    = model.k_proj(patch_tokens)
             attn = torch.einsum('bd,bnd->bn', q, k) / math.sqrt(model.embed_dim)
             attn = torch.softmax(attn, dim=1)
 
     else:
-        # ── concat / sum 모드: GradCAM ────────────────────────────────────
-        # backbone 출력을 detach해서 transformer_head 이후만 계산 그래프 생성
-        features_detached = features.detach()
+        # ── concat / sum 모드: GradCAM ─────────────────────────────────────
+        # features를 leaf 텐서로 만들면 backward() 후 .grad에 gradient가 채워짐
+        # (hook 불필요, slice view 문제 없음)
+        features_leaf = features.detach().requires_grad_(True)  # leaf tensor
 
-        refined = model.transformer_head(features_detached)
-        cls_token = refined[:, 0, :]
-        patch_tokens = refined[:, 1:, :]
+        with torch.enable_grad():
+            refined      = model.transformer_head(features_leaf)
+            cls_token    = refined[:, 0, :]
+            patch_tokens = refined[:, 1:, :]
 
-        if patch_tokens.shape[1] == 0:
-            raise RuntimeError('No patch tokens found.')
+            if patch_tokens.shape[1] == 0:
+                raise RuntimeError('No patch tokens found.')
 
-        # non-leaf tensor의 grad를 보존
-        patch_tokens.retain_grad()
+            if token_fusion == 'concat':
+                patch_avg = patch_tokens.mean(dim=1)
+                combined  = torch.cat([cls_token, patch_avg], dim=1)
+                combined  = model.concat_fusion(combined)
+            else:  # sum
+                patch_avg = patch_tokens.mean(dim=1)
+                combined  = cls_token + patch_avg
 
-        if token_fusion == 'concat':
-            patch_avg = patch_tokens.mean(dim=1)
-            combined = torch.cat([cls_token, patch_avg], dim=1)
-            combined = model.concat_fusion(combined)
-        else:  # sum
-            patch_avg = patch_tokens.mean(dim=1)
-            combined = cls_token + patch_avg
+            logits     = model.classifier(combined)
+            pred_class = logits.argmax(dim=1).item()
+            logits[0, pred_class].backward()
 
-        logits = model.classifier(combined)
+        # leaf tensor이므로 .grad가 항상 채워짐
+        # features_leaf: [1, N+1, D]  (index 0 = CLS, 1: = patches)
+        grads       = features_leaf.grad   # [1, N+1, D]
+        patch_grads = grads[:, 1:, :]      # CLS 제외: [1, N, D]
 
-        # 예측 클래스 score로 backward
-        pred_class = logits.argmax(dim=1)
-        logits[0, pred_class].backward()
-
-        grads = patch_tokens.grad  # [1, N, D]
-
-        # GradCAM: 채널 평균 gradient × relu
-        weights = grads.mean(dim=-1)          # [1, N]
-        attn = torch.relu(weights)
-
-        # relu로 전부 0이 되는 경우 gradient 절댓값으로 fallback
-        if attn.sum() == 0:
-            attn = grads.abs().mean(dim=-1)
-
-        # L1 정규화 (softmax 대신 - 음수 없으므로)
+        weights = patch_grads.mean(dim=-1)  # [1, N]
+        attn    = torch.relu(weights)
+        if attn.sum().item() == 0:          # relu로 전부 소멸 시 절댓값 fallback
+            attn = patch_grads.abs().mean(dim=-1)
         attn = attn / (attn.sum() + 1e-8)
 
-    # ── 공통: 2D 그리드로 변환 후 이미지 크기로 업샘플 ───────────────────
+    # ── 공통: 2D 그리드로 변환 후 이미지 크기로 업샘플 ──────────────────
     num_patches = attn.shape[1]
-    patch_side = int(math.sqrt(num_patches))
+    patch_side  = int(math.sqrt(num_patches))
     if patch_side * patch_side != num_patches:
         raise RuntimeError(f'Unexpected patch count {num_patches}, not square.')
 
     attn_map = attn.view(1, 1, patch_side, patch_side)
     attn_map = F.interpolate(attn_map, size=output_size, mode='bilinear', align_corners=False)
-
     return attn_map[0, 0].detach().cpu().numpy()
 
 
