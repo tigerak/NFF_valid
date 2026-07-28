@@ -148,14 +148,27 @@ def run_training(
             logger.info(f"Current Pinhole gen Prob : {current_p}...")
 
         accumulation_steps = getattr(args, 'accumulation_steps', 1)
-        train_epoch_loss, train_recall, train_epoch_f1, train_epoch_acc = train_one_epoch(model, optimizer, scheduler,
-                                           dataloader=train_loader, 
-                                           device=DEVICE, epoch=epoch,
-                                           args=args,
-                                           accumulation_steps=accumulation_steps)
+        train_epoch_loss, train_recall, train_epoch_f1, train_epoch_acc = train_one_epoch(
+            model,
+            optimizer,
+            scheduler,
+            dataloader=train_loader,
+            device=DEVICE,
+            epoch=epoch,
+            args=args,
+            accumulation_steps=accumulation_steps,
+            logger=logger,
+        )
 
-        val_epoch_loss, val_recall, val_epoch_f1, val_epoch_acc, _ = valid_one_epoch(model, optimizer, valid_loader,
-                                                                                         device= DEVICE, epoch=epoch, num_classes =  args.n_classes)
+        val_epoch_loss, val_recall, val_epoch_f1, val_epoch_acc, avg_class_losses = valid_one_epoch(
+            model,
+            optimizer,
+            valid_loader,
+            device=DEVICE,
+            epoch=epoch,
+            num_classes=args.n_classes,
+            logger=logger,
+        )
 
         history['Train Loss'].append(train_epoch_loss)
         history['Valid Loss'].append(val_epoch_loss)
@@ -171,7 +184,7 @@ def run_training(
         # deep copy the model
         if best_epoch_loss > val_epoch_loss:
 
-            logger.info(f"{b_}Validation Loss decreased ({best_epoch_loss} ---> {val_epoch_loss})")
+            logger.info(f"Validation Loss decreased ({best_epoch_loss} -> {val_epoch_loss})")
             best_epoch_loss = val_epoch_loss
             best_model_wts = copy.deepcopy(model.state_dict())
 
@@ -179,14 +192,23 @@ def run_training(
             torch.save(model.state_dict(), PATH)
 
             # Save a model file from the current directory
-            logger.info(f"Model Saved{sr_}")
+            logger.info("Model Saved")
 
         if epoch % 3 == 0:
         
-            logger.info(f"Model Saved{sr_}")
+            logger.info("Model Saved")
             PATH = "{}/f1_score{:.4f}_Loss{:.7f}_epoch{:.0f}.pth".format(save_root, val_epoch_f1, val_epoch_loss, epoch)
 
             torch.save(model.state_dict(), PATH)
+
+        logger.info(
+            "Epoch %d/%d | train_loss=%.6f train_recall=%.4f train_f1=%.4f train_acc=%.4f | "
+            "val_loss=%.6f val_recall=%.4f val_f1=%.4f val_acc=%.4f",
+            epoch, num_epochs,
+            train_epoch_loss, train_recall, train_epoch_f1, train_epoch_acc,
+            val_epoch_loss, val_recall, val_epoch_f1, val_epoch_acc,
+        )
+        logger.info("Epoch %d class loss: %s", epoch, avg_class_losses)
 
         middle_time = time.time() - start
         logger.info("Middle time: {:.0f}h {:.0f}m {:.0f}s".format(
@@ -214,7 +236,7 @@ def run_training(
 
 
 
-def train_one_epoch(model, optimizer, scheduler, dataloader, device, epoch, args, accumulation_steps=1):
+def train_one_epoch(model, optimizer, scheduler, dataloader, device, epoch, args, accumulation_steps=1, logger=None):
 
     model.train()
     
@@ -231,6 +253,8 @@ def train_one_epoch(model, optimizer, scheduler, dataloader, device, epoch, args
     use_cutmix = getattr(args, 'use_cutmix', False)
     mixup_alpha = getattr(args, 'mixup_alpha', 1.0)
     
+    log_interval = int(getattr(args, 'log_interval', 100))
+
     for step, data in bar:
         
         patch, label = data[0], data[1]
@@ -288,6 +312,16 @@ def train_one_epoch(model, optimizer, scheduler, dataloader, device, epoch, args
         
         epoch_loss = running_loss / dataset_size
         bar.set_postfix(Epoch=epoch, Train_Loss=epoch_loss, LR=optimizer.param_groups[0]['lr'])
+
+        if logger is not None and (step + 1) % max(log_interval, 1) == 0:
+            logger.info(
+                "[Train] epoch=%d step=%d/%d loss=%.6f lr=%.8f",
+                epoch,
+                step + 1,
+                len(dataloader),
+                epoch_loss,
+                optimizer.param_groups[0]['lr'],
+            )
     
     # gc.collect()
     
@@ -295,7 +329,7 @@ def train_one_epoch(model, optimizer, scheduler, dataloader, device, epoch, args
 
     return epoch_loss, epoch_recall, epoch_f1, epoch_acc
 
-def valid_one_epoch(model, optimizer,dataloader, device, epoch, num_classes):
+def valid_one_epoch(model, optimizer, dataloader, device, epoch, num_classes, logger=None):
     with torch.inference_mode():
 
         model.eval()
@@ -306,7 +340,7 @@ def valid_one_epoch(model, optimizer,dataloader, device, epoch, num_classes):
         class_loss_sum = torch.zeros(num_classes, dtype=torch.float32, device=device)
         class_counts = torch.zeros(num_classes, dtype=torch.float32, device=device)
         bar = tqdm(enumerate(dataloader), total=len(dataloader), ascii= True)
-        for step, data in bar:        
+        for step, data in bar:
 
             patch, label = data[0], data[1]
             images = patch.to(device, dtype=torch.float32, non_blocking=True)
@@ -331,7 +365,19 @@ def valid_one_epoch(model, optimizer,dataloader, device, epoch, num_classes):
             
             epoch_loss = running_loss / dataset_size
 
-            bar.set_postfix(Epoch=epoch, Valid_Loss=epoch_loss, LR=optimizer.param_groups[0]['lr'])   
+            bar.set_postfix(Epoch=epoch, Valid_Loss=epoch_loss, LR=optimizer.param_groups[0]['lr'])
+
+            if logger is not None:
+                # valid는 배치 수가 상대적으로 적어서 마지막 step만 로그
+                if (step + 1) == len(dataloader):
+                    logger.info(
+                        "[Valid] epoch=%d step=%d/%d loss=%.6f lr=%.8f",
+                        epoch,
+                        step + 1,
+                        len(dataloader),
+                        epoch_loss,
+                        optimizer.param_groups[0]['lr'],
+                    )
             
         epoch_recall, epoch_f1, epoch_acc = _metrics_from_confusion_matrix(conf_mat)
 
@@ -339,7 +385,10 @@ def valid_one_epoch(model, optimizer,dataloader, device, epoch, num_classes):
             k: (class_loss_sum[k] / class_counts[k]).item() if class_counts[k] > 0 else 'no samples'
             for k in range(num_classes)
         }
-        print(f"Epoch {epoch}: {avg_class_losses}")
+        if logger is not None:
+            logger.info(f"Epoch {epoch}: {avg_class_losses}")
+        else:
+            print(f"Epoch {epoch}: {avg_class_losses}")
         gc.collect()
         
     return epoch_loss, epoch_recall, epoch_f1, epoch_acc, avg_class_losses
