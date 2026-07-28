@@ -165,55 +165,90 @@ def collect_test_data(args):
 
 
 def compute_transformer_attention(model, image_tensor, output_size):
-    """token_fusion 방식에 맞는 패치 중요도 히트맵 계산."""
+    """token_fusion 방식에 맞는 패치 중요도 히트맵 계산.
+    - attn : 학습된 q/k projection 어텐션 가중치 직접 사용 (forward와 동일)
+    - concat/sum : GradCAM (예측 클래스 score의 patch_tokens gradient * activation)
+    """
     if not hasattr(model, 'backbone') or not hasattr(model, 'transformer_head'):
         raise RuntimeError('Model does not expose transformer attention internals.')
 
     token_fusion = str(getattr(model, 'token_fusion', 'sum')).lower()
 
     model.eval()
+
+    # backbone은 항상 no_grad (frozen)
     with torch.no_grad():
         features = model.backbone.forward_features(image_tensor.unsqueeze(0))
 
     if features.ndim != 3:
         raise RuntimeError(f'Expected token features [B, N, D], got {tuple(features.shape)}')
 
-    refined = model.transformer_head(features)
-    cls_token = refined[:, 0, :]
-    patch_tokens = refined[:, 1:, :]
-
-    if patch_tokens.shape[1] == 0:
-        raise RuntimeError('No patch tokens found.')
-
     if token_fusion == 'attn' and hasattr(model, 'q_proj') and hasattr(model, 'k_proj'):
-        q = model.q_proj(cls_token)
-        k = model.k_proj(patch_tokens)
-        attn = torch.einsum('bd,bnd->bn', q, k) / math.sqrt(model.embed_dim)
-        attn = torch.softmax(attn, dim=1)
-    elif token_fusion == 'concat':
-        cls_norm = F.normalize(cls_token, dim=1)
-        patch_norm = F.normalize(patch_tokens, dim=2)
-        attn = torch.einsum('bd,bnd->bn', cls_norm, patch_norm)
-        attn = torch.softmax(attn, dim=1)
-    else:
-        patch_score = patch_tokens.norm(dim=-1)
-        attn = torch.softmax(patch_score, dim=1)
+        # ── attn 모드: forward와 동일한 연산, gradient 불필요 ──────────────
+        with torch.no_grad():
+            refined = model.transformer_head(features)
+            cls_token = refined[:, 0, :]
+            patch_tokens = refined[:, 1:, :]
 
-    # attention score는 패치 개수만큼의 길이를 가집니다.
+            if patch_tokens.shape[1] == 0:
+                raise RuntimeError('No patch tokens found.')
+
+            q = model.q_proj(cls_token)
+            k = model.k_proj(patch_tokens)
+            attn = torch.einsum('bd,bnd->bn', q, k) / math.sqrt(model.embed_dim)
+            attn = torch.softmax(attn, dim=1)
+
+    else:
+        # ── concat / sum 모드: GradCAM ────────────────────────────────────
+        # backbone 출력을 detach해서 transformer_head 이후만 계산 그래프 생성
+        features_detached = features.detach()
+
+        refined = model.transformer_head(features_detached)
+        cls_token = refined[:, 0, :]
+        patch_tokens = refined[:, 1:, :]
+
+        if patch_tokens.shape[1] == 0:
+            raise RuntimeError('No patch tokens found.')
+
+        # non-leaf tensor의 grad를 보존
+        patch_tokens.retain_grad()
+
+        if token_fusion == 'concat':
+            patch_avg = patch_tokens.mean(dim=1)
+            combined = torch.cat([cls_token, patch_avg], dim=1)
+            combined = model.concat_fusion(combined)
+        else:  # sum
+            patch_avg = patch_tokens.mean(dim=1)
+            combined = cls_token + patch_avg
+
+        logits = model.classifier(combined)
+
+        # 예측 클래스 score로 backward
+        pred_class = logits.argmax(dim=1)
+        logits[0, pred_class].backward()
+
+        grads = patch_tokens.grad  # [1, N, D]
+
+        # GradCAM: 채널 평균 gradient × relu
+        weights = grads.mean(dim=-1)          # [1, N]
+        attn = torch.relu(weights)
+
+        # relu로 전부 0이 되는 경우 gradient 절댓값으로 fallback
+        if attn.sum() == 0:
+            attn = grads.abs().mean(dim=-1)
+
+        # L1 정규화 (softmax 대신 - 음수 없으므로)
+        attn = attn / (attn.sum() + 1e-8)
+
+    # ── 공통: 2D 그리드로 변환 후 이미지 크기로 업샘플 ───────────────────
     num_patches = attn.shape[1]
     patch_side = int(math.sqrt(num_patches))
     if patch_side * patch_side != num_patches:
         raise RuntimeError(f'Unexpected patch count {num_patches}, not square.')
 
-    # 1차원 패치 어텐션을 2D 패치 그리드로 변환합니다.
-    # 예: 196개 패치 -> 14x14 그리드
     attn_map = attn.view(1, 1, patch_side, patch_side)
-
-    # 최종 이미지 크기로 업샘플하여 히트맵을 만듭니다.
-    # bilinear interpolation을 사용해 부드러운 맵 생성
     attn_map = F.interpolate(attn_map, size=output_size, mode='bilinear', align_corners=False)
 
-    # 결과를 CPU numpy로 변환해서 반환
     return attn_map[0, 0].detach().cpu().numpy()
 
 
