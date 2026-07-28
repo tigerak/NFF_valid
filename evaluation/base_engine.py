@@ -241,7 +241,7 @@ class BaseEngine(ABC):
 # ============================================================================
 # 모델 로더
 # ============================================================================
-def load_model(args, weight_path, device):
+def load_model(args, weight_path, device, strict=True):
     """모델 로드
     
     Args:
@@ -255,7 +255,7 @@ def load_model(args, weight_path, device):
     model = get_models.build_model(args)
     
     weight = torch.load(weight_path, map_location=device)
-    model.load_state_dict(weight, strict=True)
+    model.load_state_dict(weight, strict=strict)
     model.to(device)
     model.eval()
     

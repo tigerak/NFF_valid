@@ -4,21 +4,21 @@ import torch.nn.functional as F
 def mixup(x, y, alpha=1.0):
     """Mixup: 두 샘플을 선형 보간"""
     batch_size = x.size(0)
-    index = torch.randperm(batch_size)
+    index = torch.randperm(batch_size, device=x.device)
     
-    lam = torch.distributions.Beta(alpha, alpha).sample().item()
+    lam = torch.distributions.Beta(alpha, alpha).sample().to(x.device)
     
     mixed_x = lam * x + (1 - lam) * x[index]
     y_a, y_b = y, y[index]
     
-    return mixed_x, y_a, y_b, lam
+    return mixed_x, y_a, y_b, lam.item()
 
 def cutmix(x, y, alpha=1.0):
     """Cutmix: 이미지 영역을 교환"""
     batch_size = x.size(0)
-    index = torch.randperm(batch_size)
+    index = torch.randperm(batch_size, device=x.device)
     
-    lam = torch.distributions.Beta(alpha, alpha).sample().item()
+    lam = torch.distributions.Beta(alpha, alpha).sample().to(x.device)
     
     # 무작위 박스 생성
     _, _, h, w = x.size()
@@ -42,4 +42,4 @@ def cutmix(x, y, alpha=1.0):
     
     y_a, y_b = y, y[index]
     
-    return mixed_x, y_a, y_b, lam
+    return mixed_x, y_a, y_b, lam.item()

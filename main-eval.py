@@ -79,14 +79,14 @@ def main():
         )
 
     # 평가 설정
-    cm_display_order = args.labels
-    # if is_smw_eval:
-    #     cm_display_order = ['NG_NO',  'NG_PINHOLE', 'NG_SPATTER', 'OK', "OK_OVL"]
-    # else:
-    #     cm_display_order = [
-    #         'CRACK_FOIL_1','CRACK_FOIL_2', 'CRACK_1', 'CRACK_2', 'DEBRIS',
-    #         'PROTRUSION_1', 'PROTRUSION_2', 'PROTRUSION_3', 'CRATER_1', 'CRATER_2', 'SCRATCH_TINY'
-    #     ]
+    # cm_display_order = args.labels
+    if is_smw_eval:
+        cm_display_order = ['NG_NO',  'NG_PINHOLE', 'NG_SPATTER', 'OK', "OK_OVL"]
+    else:
+        cm_display_order = [
+            'CRACK_FOIL_1','CRACK_FOIL_2', 'CRACK_1', 'CRACK_2', 'DEBRIS',
+            'PROTRUSION_1', 'PROTRUSION_2', 'PROTRUSION_3', 'CRATER_1', 'CRATER_2', 'SCRATCH_TINY'
+        ]
 
     # 평가 매니저 생성 및 실행
     eval_manager = EvalManager(args, is_smw=is_smw_eval, logger=logger)

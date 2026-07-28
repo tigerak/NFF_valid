@@ -1,4 +1,5 @@
-import os, gc, time , copy 
+import os, gc, time, copy 
+import logging
 from collections import defaultdict
 
 import numpy as np
@@ -6,7 +7,6 @@ import pandas as pd
 
 import torch
 from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
-from sklearn.metrics import f1_score, recall_score, accuracy_score
 
 # Utils
 
@@ -20,6 +20,28 @@ sr_ = Style.RESET_ALL
 from utils import losses
 from utils import make_debug
 from utils import augmentation
+
+
+def _update_confusion_matrix(conf_mat, targets, preds, num_classes):
+    flat_idx = targets * num_classes + preds
+    conf_mat += torch.bincount(flat_idx, minlength=num_classes * num_classes).reshape(num_classes, num_classes)
+
+
+def _metrics_from_confusion_matrix(conf_mat):
+    conf_mat = conf_mat.float()
+    tp = torch.diag(conf_mat)
+    support = conf_mat.sum(dim=1)
+    predicted = conf_mat.sum(dim=0)
+
+    recall_per_class = tp / support.clamp(min=1.0)
+    precision_per_class = tp / predicted.clamp(min=1.0)
+    f1_per_class = (2.0 * precision_per_class * recall_per_class) / (precision_per_class + recall_per_class).clamp(min=1e-12)
+
+    macro_recall = recall_per_class.mean().item()
+    macro_f1 = f1_per_class.mean().item()
+    acc = (tp.sum() / conf_mat.sum().clamp(min=1.0)).item()
+
+    return macro_recall, macro_f1, acc
 
 
 def run_training(
@@ -198,9 +220,8 @@ def train_one_epoch(model, optimizer, scheduler, dataloader, device, epoch, args
     
     dataset_size = 0
     running_loss = 0.0
-    running_recall  = 0.0
-    running_f1 = 0.0 
-    running_acc = 0.0
+    num_classes = args.n_classes
+    conf_mat = torch.zeros((num_classes, num_classes), dtype=torch.long, device=device)
 
     bar = tqdm(enumerate(dataloader), total=len(dataloader), ascii= True)
     optimizer.zero_grad()  # 초기화
@@ -213,8 +234,8 @@ def train_one_epoch(model, optimizer, scheduler, dataloader, device, epoch, args
     for step, data in bar:
         
         patch, label = data[0], data[1]
-        images = patch.to(device, dtype=torch.float32)
-        targets = label.to(device)
+        images = patch.to(device, dtype=torch.float32, non_blocking=True)
+        targets = label.to(device, non_blocking=True)
         
         batch_size = images.size(0)
         
@@ -258,28 +279,20 @@ def train_one_epoch(model, optimizer, scheduler, dataloader, device, epoch, args
 
         # 메트릭 계산 (targets_a 기준)
         targets_for_metric = targets_a if targets_b is not None else targets
-        
-        recall = recall_score(targets_for_metric.cpu().tolist(), torch.argmax(outputs, dim=1).cpu().tolist(), average='macro')
-        f1 = f1_score(targets_for_metric.cpu().tolist(), torch.argmax(outputs, dim=1).cpu().tolist(), average='macro')
-        acc = accuracy_score(targets_for_metric.cpu().tolist(), torch.argmax(outputs, dim=1).cpu().tolist())
+        preds = torch.argmax(outputs, dim=1)
+        _update_confusion_matrix(conf_mat, targets_for_metric.long(), preds.long(), num_classes)
         
         running_loss += (loss.item() * accumulation_steps * batch_size)  # 원래 loss 스케일 복원
-        running_recall  += (recall * batch_size)
-        running_f1  += (f1 * batch_size)
-        running_acc  += (acc * batch_size)
 
         dataset_size += batch_size
         
         epoch_loss = running_loss / dataset_size
-        epoch_recall = running_recall / dataset_size
-        epoch_f1 = running_f1 / dataset_size
-        epoch_acc = running_acc / dataset_size
-
-        bar.set_postfix(Epoch=epoch, Train_Loss=epoch_loss, Train_recall = epoch_recall, Train_f1 = epoch_f1, train_acc = epoch_acc,
-                        LR=optimizer.param_groups[0]['lr'])
+        bar.set_postfix(Epoch=epoch, Train_Loss=epoch_loss, LR=optimizer.param_groups[0]['lr'])
     
     # gc.collect()
     
+    epoch_recall, epoch_f1, epoch_acc = _metrics_from_confusion_matrix(conf_mat)
+
     return epoch_loss, epoch_recall, epoch_f1, epoch_acc
 
 def valid_one_epoch(model, optimizer,dataloader, device, epoch, num_classes):
@@ -289,48 +302,44 @@ def valid_one_epoch(model, optimizer,dataloader, device, epoch, num_classes):
         
         dataset_size = 0
         running_loss = 0.0
-        running_recall  = 0.0
-        running_f1 = 0.0 
-        running_acc = 0.0
-
-        class_losses = {i: [] for i in range(num_classes)}
+        conf_mat = torch.zeros((num_classes, num_classes), dtype=torch.long, device=device)
+        class_loss_sum = torch.zeros(num_classes, dtype=torch.float32, device=device)
+        class_counts = torch.zeros(num_classes, dtype=torch.float32, device=device)
         bar = tqdm(enumerate(dataloader), total=len(dataloader), ascii= True)
         for step, data in bar:        
 
             patch, label = data[0], data[1]
-            images = patch.to(device, dtype=torch.float32)
-            targets = label.to(device)
+            images = patch.to(device, dtype=torch.float32, non_blocking=True)
+            targets = label.to(device, non_blocking=True)
             
             batch_size = images.size(0)
             
             outputs = model(images)
-            loss = losses.criterion(outputs, targets)
+            per_sample_loss = torch.nn.functional.cross_entropy(outputs, targets, reduction='none')
+            loss = per_sample_loss.mean()
+            preds = torch.argmax(outputs, dim=1)
 
-            losses.calculate_loss_per_class(class_losses, losses.criterion, outputs, targets)
+            _update_confusion_matrix(conf_mat, targets.long(), preds.long(), num_classes)
 
-            recall = recall_score(targets.cpu().tolist(), torch.argmax(outputs, dim=1).cpu().tolist(), average='macro')
-            f1 = f1_score(targets.cpu().tolist(), torch.argmax(outputs, dim=1).cpu().tolist(), average='macro')
-            acc = accuracy_score(targets.cpu().tolist(), torch.argmax(outputs, dim=1).cpu().tolist())
+            class_loss_sum.index_add_(0, targets.long(), per_sample_loss)
+            class_counts.index_add_(0, targets.long(), torch.ones_like(per_sample_loss))
 
             
-            running_loss += (loss.item() * batch_size)
-            running_recall  += (recall * batch_size)
-            running_f1  += (f1 * batch_size)
-            running_acc  += (acc * batch_size)
+            running_loss += per_sample_loss.sum().item()
 
             dataset_size += batch_size
             
             epoch_loss = running_loss / dataset_size
-            epoch_recall = running_recall / dataset_size
-            epoch_f1 = running_f1 / dataset_size
-            epoch_acc = running_acc / dataset_size
 
-            bar.set_postfix(Epoch=epoch, Valid_Loss=epoch_loss, Valid_recall=epoch_recall, Valid_f1 = epoch_f1, Valid_acc =  epoch_acc,
-                            LR=optimizer.param_groups[0]['lr'])   
+            bar.set_postfix(Epoch=epoch, Valid_Loss=epoch_loss, LR=optimizer.param_groups[0]['lr'])   
             
+        epoch_recall, epoch_f1, epoch_acc = _metrics_from_confusion_matrix(conf_mat)
 
-        avg_class_losses = {k: sum(v) / len(v) if len(v) > 0 else 'no samples' for k, v in class_losses.items()}
-        print(f"Epoch {epoch+1}: {avg_class_losses}")
+        avg_class_losses = {
+            k: (class_loss_sum[k] / class_counts[k]).item() if class_counts[k] > 0 else 'no samples'
+            for k in range(num_classes)
+        }
+        print(f"Epoch {epoch}: {avg_class_losses}")
         gc.collect()
         
     return epoch_loss, epoch_recall, epoch_f1, epoch_acc, avg_class_losses
