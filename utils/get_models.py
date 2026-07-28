@@ -193,7 +193,7 @@ class TransformerHeadClassifier(nn.Module):
         self.embed_dim = backbone.num_features # 768
         self.num_classes = args.n_classes
         self.freeze_backbone = bool(getattr(args, 'freeze_backbone', True))
-        self.token_fusion = getattr(args, 'token_fusion', None)  # 'attn', 'concat', or None
+        self.token_fusion = getattr(args, 'token_fusion', None)  # 'attn', 'concat', 'wt_concat', or None
         
         # Freeze backbone parameters if requested.
         if self.freeze_backbone:
@@ -222,8 +222,8 @@ class TransformerHeadClassifier(nn.Module):
         # cls_token과 patch_avg 비중을 조절하는 학습 게이트
         self.fusion_logit = nn.Parameter(torch.tensor(0.0))
 
-        # Concat fusion 시 분류기 입력 차원 조정
-        if self.token_fusion == 'concat':
+        # Concat 계열 fusion 시 분류기 입력 차원 조정
+        if self.token_fusion in ['concat', 'wt_concat']:
             self.concat_fusion = nn.Sequential(
                 nn.LayerNorm(self.embed_dim * 2),
                 nn.Linear(self.embed_dim * 2, self.embed_dim),
@@ -274,9 +274,19 @@ class TransformerHeadClassifier(nn.Module):
             alpha = torch.sigmoid(self.fusion_logit)
             combined = alpha * cls_token + (1.0 - alpha) * patch_avg
         elif self.token_fusion == 'concat':
+            # 단순 평균 patch summary + concat
             patch_avg = patch_tokens.mean(dim=1)  # [B, D]
             combined = torch.cat([cls_token, patch_avg], dim=1)  # [B, 2*D]
-            # 분류기 입력 차원 조정
+            combined = self.concat_fusion(combined)  # [B, D]
+        elif self.token_fusion == 'wt_concat':
+            # attn의 gated blend 대신, weighted patch summary를 concat으로 결합
+            query = self.q_proj(cls_token)  # [B, D]
+            keys = self.k_proj(patch_tokens)  # [B, N-1, D]
+            attn_weights = torch.einsum('bd, bnd -> bn', query, keys)  # [B, N-1]
+            attn_weights = torch.softmax(attn_weights / (self.embed_dim ** 0.5), dim=1)  # [B, N-1]
+
+            patch_summary = torch.einsum('bn, bnd -> bd', attn_weights, patch_tokens)  # [B, D]
+            combined = torch.cat([cls_token, patch_summary], dim=1)  # [B, 2*D]
             combined = self.concat_fusion(combined)  # [B, D]
         else:
             # 단순 평균 풀링 (*0.5도 안 함 <- 초기 버전)
