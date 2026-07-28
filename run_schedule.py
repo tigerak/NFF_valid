@@ -41,12 +41,12 @@ SCHEDULE = [
     #     },
     # },
 
-    # ----- ANODE: concat -----
+    # ----- ANODE: weight concat -----
     {
         'config': './config/SURFACE_ANODE_classification.yaml',
         'overrides': {
             'project_name': f'SURFACE_ANODE_DiNO_Concat_{TODAY}',
-            'token_fusion': 'concat',
+            'token_fusion': 'wt_concat',
             'focal_alpha': [1., 1., 1., 1., 1., 1., 1., 1., 1., 1., 1.]
         },
     },
