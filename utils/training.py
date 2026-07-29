@@ -761,7 +761,19 @@ def run_stage2_training(model, optimizer, scheduler, train_dataset, valid_datase
     if teacher_weight and os.path.exists(teacher_weight):
         teacher = copy.deepcopy(model)
         state = torch.load(teacher_weight, map_location=device)
-        teacher.load_state_dict(state, strict=True)
+        try:
+            teacher.load_state_dict(state, strict=True)
+        except RuntimeError as e:
+            logger.error(
+                '[Stage2] Teacher/Student 구조 불일치로 KD 학습을 중단합니다. '
+                'token_fusion, head_type, n_classes, model_name 설정을 Stage1과 동일하게 맞추세요. '
+                'teacher=%s | student_project=%s | reason=%s',
+                teacher_weight,
+                getattr(args, 'project_name', 'unknown'),
+                str(e),
+            )
+            raise
+
         teacher.to(device).eval()
         for p in teacher.parameters():
             p.requires_grad = False
