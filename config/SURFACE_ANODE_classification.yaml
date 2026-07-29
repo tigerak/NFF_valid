@@ -1,7 +1,7 @@
-train_dir: 'D:\NFF_ModelDeveloper\IMG_DATA\SURFACE_ANODE_dev\TRAIN_TEST\TRAIN'
-test_dir: 'D:\NFF_ModelDeveloper\IMG_DATA\SURFACE_ANODE_dev\TRAIN_TEST\TEST'
-save_dir: 'D:\NFF_ModelDeveloper\models\save'
-model_dir: 'D:\NFF_ModelDeveloper\models\pretrained'
+train_dir: 'C:\Users\LGESLocalAdmin\Desktop\NFF_valid\IMG_DATA\TRAIN_TEST\TRAIN'
+test_dir: 'C:\Users\LGESLocalAdmin\Desktop\NFF_valid\IMG_DATA\TRAIN_TEST\TEST'
+save_dir: 'C:\Users\LGESLocalAdmin\Desktop\NFF_valid\models\save'
+model_dir: 'C:\Users\LGESLocalAdmin\Desktop\NFF_valid\models\pretrained'
 project_name : 'SURFACE_ANODE_DiNO_0727'
 model_name : 'vit_small_patch14_dinov2.lvd142m' ## TIMM type
 pretrained : 'dino_small.bin' 
@@ -14,9 +14,9 @@ img_size: [518, 518]
 labels : ['CRACK_1', 'CRACK_2', 'CRACK_FOIL_1', 'CRACK_FOIL_2', 'CRATER_1', 'CRATER_2', 'DEBRIS', 'PROTRUSION_1', 'PROTRUSION_2','PROTRUSION_3', 'SCRATCH_TINY']
 valid_ratio : 0.1
 datasets_name : "SURFACE_ANODE"
-batch_size : 64
-num_workers : 8
-accumulation_steps : 2
+batch_size : 128
+num_workers : 12
+accumulation_steps : 1
 focal_gamma: 2.0
 focal_alpha: [1.2, 1.2, 1.5, 1.5, 1., 1., 1., 1., 1., 1., 1.]
 token_fusion: "sum" # concat | attn | sum
