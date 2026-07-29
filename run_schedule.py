@@ -41,48 +41,58 @@ SCHEDULE = [
     #     },
     # },
 
-    # ----- ANODE: weight concat -----
-    {
-        'config': './config/SURFACE_ANODE_classification.yaml',
-        'overrides': {
-            'project_name': f'SURFACE_ANODE_DiNO_Concat_{TODAY}',
-            'token_fusion': 'wt_concat',
-            'focal_alpha': [1., 1., 1., 1., 1., 1., 1., 1., 1., 1., 1.]
-        },
-    },
+    # # ----- ANODE: weight concat -----
+    # {
+    #     'config': './config/SURFACE_ANODE_classification.yaml',
+    #     'overrides': {
+    #         'project_name': f'SURFACE_ANODE_DiNO_Concat_{TODAY}',
+    #         'token_fusion': 'wt_concat',
+    #         'focal_alpha': [1., 1., 1., 1., 1., 1., 1., 1., 1., 1., 1.]
+    #     },
+    # },
 
-    # ----- ANODE: Attention / focal alpha 1. -----
-    {
-        'config': './config/SURFACE_ANODE_classification.yaml',
-        'overrides': {
-            'project_name': f'SURFACE_ANODE_DiNO_Attn_{TODAY}',
-            'token_fusion': 'attn',
-            'focal_alpha': [1., 1., 1., 1., 1., 1., 1., 1., 1., 1., 1.]
-        },
-    },
+    # # ----- ANODE: Attention / focal alpha 1. -----
+    # {
+    #     'config': './config/SURFACE_ANODE_classification.yaml',
+    #     'overrides': {
+    #         'project_name': f'SURFACE_ANODE_DiNO_Attn_{TODAY}',
+    #         'token_fusion': 'attn',
+    #         'focal_alpha': [1., 1., 1., 1., 1., 1., 1., 1., 1., 1., 1.]
+    #     },
+    # },
 
-    # ----- ANODE: Attention / focal alpha .5 -----
-    {
-        'config': './config/SURFACE_ANODE_classification.yaml',
-        'overrides': {
-            'project_name': f'SURFACE_ANODE_DiNO_Attn_FA05_{TODAY}',
-            'token_fusion': 'attn',
-            'focal_alpha': [.5, .5, .5, .5, .5, .5, .5, .5, .5, .5, .5]
-        },
-    },
+    # # ----- ANODE: Attention / focal alpha .5 -----
+    # {
+    #     'config': './config/SURFACE_ANODE_classification.yaml',
+    #     'overrides': {
+    #         'project_name': f'SURFACE_ANODE_DiNO_Attn_FA05_{TODAY}',
+    #         'token_fusion': 'attn',
+    #         'focal_alpha': [.5, .5, .5, .5, .5, .5, .5, .5, .5, .5, .5]
+    #     },
+    # },
 
     
-    # ----- ANODE: Attention / focal alpha 1. / Mixup -----
-    {
-        'config': './config/SURFACE_ANODE_classification.yaml',
-        'overrides': {
-            'project_name': f'SURFACE_ANODE_DiNO_Attn_FA1_Mixup_{TODAY}',
-            'token_fusion': 'attn',
-            'focal_alpha': [1., 1., 1., 1., 1., 1., 1., 1., 1., 1., 1.],
-            'use_mixup': True,
-            'mixup_alpha': 1.0
+    # # ----- ANODE: Attention / focal alpha 1. / Mixup -----
+    # {
+    #     'config': './config/SURFACE_ANODE_classification.yaml',
+    #     'overrides': {
+    #         'project_name': f'SURFACE_ANODE_DiNO_Attn_FA1_Mixup_{TODAY}',
+    #         'token_fusion': 'attn',
+    #         'focal_alpha': [1., 1., 1., 1., 1., 1., 1., 1., 1., 1., 1.],
+    #         'use_mixup': True,
+    #         'mixup_alpha': 1.0
+    #     },
+    # },
+    
+    # ----- ANODE: weight concat / focal alpha .5 -----
+        {
+            'config': './config/SURFACE_ANODE_classification.yaml',
+            'overrides': {
+                'project_name': f'SURFACE_ANODE_DiNO_Concat_FA05_{TODAY}',
+                'token_fusion': 'wt_concat',
+                'focal_alpha': [.5, .5, .5, .5, .5, .5, .5, .5, .5, .5, .5]
+            },
         },
-    },
 
 ]
 # ===========================================================================
