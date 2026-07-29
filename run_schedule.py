@@ -16,6 +16,7 @@ main() 대신 main_eval_only()를 호출하세요.
 """
 
 import os
+import glob
 import gc
 import time
 import traceback
@@ -36,16 +37,19 @@ from evaluation.eval import EvalManager
 # ===========================================================================
 TODAY = datetime.now().strftime('%m%d')
 
+# Stage1(ArcFace) -> Stage2 파이프라인에서 동일한 실험명을 공유하도록 상수화
+STAGE1_SCARC_PROJECT = f'SURFACE_ANODE_DiNO_Concat_SCArc_{TODAY}'
+
 SCHEDULE = [
-    # # ----- ANODE: sum -----
-    # {
-    #     'config': './config/SURFACE_ANODE_classification.yaml',
-    #     'overrides': {
-    #         'project_name': f'SURFACE_ANODE_DiNO_Sum_{TODAY}',
-    #         'token_fusion': 'sum',
-    #     },
-    #     'run_eval': True,   # 생략 시 기본 True
-    # },
+    # ----- ANODE: sum -----
+    {
+        'config': './config/SURFACE_ANODE_classification.yaml',
+        'overrides': {
+            'project_name': f'SURFACE_ANODE_DiNO_Sum_{TODAY}',
+            'token_fusion': 'sum',
+            'stage1_loss_mode': 'focal',
+        },
+    },
 
     # # ----- ANODE: weight concat -----
     # {
@@ -55,7 +59,6 @@ SCHEDULE = [
     #         'token_fusion': 'wt_concat',
     #         'focal_alpha': [1., 1., 1., 1., 1., 1., 1., 1., 1., 1., 1.]
     #     },
-    #     'run_eval': True,   # 생략 시 기본 True
     # },
 
     # # ----- ANODE: Attention / focal alpha 1. -----
@@ -66,7 +69,6 @@ SCHEDULE = [
     #         'token_fusion': 'attn',
     #         'focal_alpha': [1., 1., 1., 1., 1., 1., 1., 1., 1., 1., 1.]
     #     },
-    #     'run_eval': True,   # 생략 시 기본 True
     # },
 
     # # ----- ANODE: Attention / focal alpha .5 -----
@@ -77,7 +79,6 @@ SCHEDULE = [
     #         'token_fusion': 'attn',
     #         'focal_alpha': [.5, .5, .5, .5, .5, .5, .5, .5, .5, .5, .5]
     #     },
-    #     'run_eval': True,   # 생략 시 기본 True
     # },
 
     
@@ -91,20 +92,57 @@ SCHEDULE = [
     #         'use_mixup': True,
     #         'mixup_alpha': 1.0
     #     },
-    #     'run_eval': True,   # 생략 시 기본 True
     # },
     
     # ----- ANODE: weight concat / focal alpha .5 -----
-        {
-            'config': './config/SURFACE_ANODE_classification.yaml',
-            'overrides': {
-                'project_name': f'SURFACE_ANODE_DiNO_Concat_FA05_{TODAY}',
-                'token_fusion': 'wt_concat',
-                'focal_alpha': [.5, .5, .5, .5, .5, .5, .5, .5, .5, .5, .5]
-            },
-            'run_eval': True,   # 생략 시 기본 True
+    # ======================================================================
+    # 비교용 예시 2: Stage-1 / Sub-center ArcFace
+    # - cls + patch token concat 후 Sub-center ArcFace
+    # - mixup / cutmix 자동 비활성화
+    # - 4 sub-centers, m=0.3, s=64
+    # ======================================================================
+    {
+        'config': './config/SURFACE_ANODE_classification.yaml',
+        'overrides': {
+            'project_name': STAGE1_SCARC_PROJECT,
+            'token_fusion': 'wt_concat',
+            'stage1_loss_mode': 'subcenter_arcface',
+            'num_sub_centers': 4,
+            'arcface_margin': 0.3,
+            'arcface_scale': 64.0,
+            'arcface_prune_warmup_epochs': 3,
+            'arcface_prune_interval': 2,
+            'arcface_prune_min_usage': 2,
+            'arcface_prune_max_remove_per_class': 1,
         },
-        
+    },
+
+    # ======================================================================
+    # 비교용 예시 3: Stage-2 / Sub-center ArcFace 기반 fine-tuning
+    # - Stage-1에서 학습한 Sub-center ArcFace checkpoint를 teacher로 사용
+    # - Stage-2에서는 LSCE + optional KD
+    # - suffix로 결과 폴더 분리
+    # ======================================================================
+    {
+        'config': './config/SURFACE_ANODE_classification.yaml',
+        'overrides': {
+            'project_name': STAGE1_SCARC_PROJECT,
+            'use_stage2': True,
+            'stage1_loss_mode': 'subcenter_arcface',
+            'stage2_backbone_path': r'D:\NFF_ModelDeveloper\models\modi_dino\dino_small.bin',
+            'stage2_max_epoch': 12,
+            'stage2_label_smoothing': 0.05,
+            'stage2_kd_alpha': 0.5,
+            'stage2_kd_temperature': 3.0,
+            'stage2_append_suffix': True,
+            'stage2_project_suffix': '_S2_LAST1',
+            'stage2_teacher_project_name': STAGE1_SCARC_PROJECT,
+            'stage2_train_scope': 'last_blocks',
+            'stage2_unfreeze_last_n_blocks': 1,
+            'stage2_backbone_lr': 1e-6,
+        },
+    },
+
 ]
 
 
@@ -112,12 +150,15 @@ SCHEDULE = [
 # 평가만 실행하고 싶을 때 사용하세요 (SCHEDULE=[] 일 때만 동작)
 # ===========================================================================
 EVAL_ONLY_SCHEDULE = [
-    # {
-    #     'config': './config/SURFACE_ANODE_classification.yaml',
-    #     'overrides': {
-    #         'project_name': f'SURFACE_ANODE_DiNO_Concat_FA05_{TODAY}',
-    #     },
-    # },
+    # ----- ANODE: sum -----
+    {
+        'config': './config/SURFACE_ANODE_classification.yaml',
+        'overrides': {
+            'project_name': f'SURFACE_ANODE_DiNO_Sum_0729',
+            'token_fusion': 'sum',
+        },
+    },
+
 ]
 # ===========================================================================
 
@@ -131,6 +172,15 @@ def run_one(config_path: str, overrides: dict, run_logger: logging.Logger):
     # overrides 적용
     for key, value in overrides.items():
         setattr(args, key, value)
+
+    use_stage2 = bool(getattr(args, 'use_stage2', False))
+    base_project_name = args.project_name
+
+    # Stage-2 실험명 suffix 정책
+    if use_stage2 and bool(getattr(args, 'stage2_append_suffix', False)):
+        suffix = str(getattr(args, 'stage2_project_suffix', '_S2'))
+        if suffix and not str(args.project_name).endswith(suffix):
+            args.project_name = f'{args.project_name}{suffix}'
 
     DEVICE = torch.device(args.device)
 
@@ -147,6 +197,7 @@ def run_one(config_path: str, overrides: dict, run_logger: logging.Logger):
     head_type = getattr(args, 'head_type', 'transformer')
     train_logger.info(f'Model head type: {head_type}')
     train_logger.info(f'Pretrained model: {args.pretrained}')
+    train_logger.info(f'Use stage2: {use_stage2}')
     print(f'**** Model head type : {head_type} ****')
     print(f'**** Pretrained model : {args.pretrained} ****')
 
@@ -154,6 +205,40 @@ def run_one(config_path: str, overrides: dict, run_logger: logging.Logger):
         model = get_models.get_finetune_model(model, args)
         train_logger.info(f'Fine tuning: {args.finetuning_weight}')
         print(f'**** fine tunning model : {args.project_name}, {args.finetuning_weight} ****\n')
+
+    # Stage-2: modi_dino 백본 로드 + stage2 epoch 반영
+    if use_stage2:
+        # suffix 사용 시에도 teacher를 stage1 프로젝트 폴더에서 자동 탐색 가능하도록 보정
+        teacher_weight = getattr(args, 'stage2_teacher_weight', '')
+        teacher_project_name = getattr(args, 'stage2_teacher_project_name', base_project_name)
+        if not teacher_weight:
+            teacher_root = os.path.join(args.save_dir, teacher_project_name)
+            teacher_candidates = glob.glob(os.path.join(teacher_root, 'f1_score*_Loss*_epoch*.pth'))
+            if teacher_candidates:
+                def _extract_f1(path_str):
+                    try:
+                        return float(os.path.basename(path_str).split('f1_score')[1].split('_Loss')[0])
+                    except Exception:
+                        return -1.0
+
+                best_teacher = max(teacher_candidates, key=_extract_f1)
+                args.stage2_teacher_weight = best_teacher
+                train_logger.info(f'[Stage2] Teacher auto-selected: {best_teacher}')
+
+        stage2_backbone_path = getattr(args, 'stage2_backbone_path', '')
+        if stage2_backbone_path and os.path.exists(stage2_backbone_path):
+            stage2_state = torch.load(stage2_backbone_path, map_location='cpu')
+            if hasattr(model, 'backbone'):
+                model.backbone.load_state_dict(stage2_state, strict=False)
+            else:
+                model.load_state_dict(stage2_state, strict=False)
+            train_logger.info(f'[Stage2] Fine-tuned backbone loaded: {stage2_backbone_path}')
+        else:
+            train_logger.warning(f'[Stage2] stage2_backbone_path not found: {stage2_backbone_path}')
+
+        args.max_epoch = int(getattr(args, 'stage2_max_epoch', args.max_epoch))
+        if hasattr(model, 'freeze_backbone'):
+            model.freeze_backbone = False
 
     model.to(DEVICE)
 
@@ -164,11 +249,18 @@ def run_one(config_path: str, overrides: dict, run_logger: logging.Logger):
     train_dataset, valid_dataset = datasets.get_dataset(train_data, valid_data, train_labels, valid_labels, args)
     train_logger.info(f'Dataset loaded: train={len(train_data)}, valid={len(valid_data)}')
 
-    training.run_training(
-        model, optimizer, sched,
-        train_dataset, valid_dataset,
-        args, logger=train_logger
-    )
+    if use_stage2:
+        training.run_stage2_training(
+            model, optimizer, sched,
+            train_dataset, valid_dataset,
+            args, logger=train_logger
+        )
+    else:
+        training.run_training(
+            model, optimizer, sched,
+            train_dataset, valid_dataset,
+            args, logger=train_logger
+        )
 
     return args
 
@@ -363,7 +455,6 @@ def main():
         config_path = job['config']
         overrides = job.get('overrides', {})
         project_name = overrides.get('project_name', config_path)
-        run_eval_after_train = job.get('run_eval', True)
 
         schedule_logger.info(f'\n---------- Job {idx}/{total}: {project_name} ----------')
         schedule_logger.info(f'Config: {config_path}  |  Overrides: {overrides}')
@@ -378,30 +469,10 @@ def main():
             msg = f'[TRAIN SUCCESS] {project_name} ({elapsed/3600:.2f}h)'
             schedule_logger.info(msg)
 
-            eval_status = 'SKIPPED'
-            eval_elapsed = 0.0
-            eval_error = ''
-
-            if run_eval_after_train:
-                eval_start = time.time()
-                try:
-                    run_eval(args, schedule_logger)
-                    eval_elapsed = time.time() - eval_start
-                    eval_status = 'SUCCESS'
-                except Exception as e:
-                    eval_elapsed = time.time() - eval_start
-                    eval_status = 'FAILED'
-                    eval_error = str(e)
-                    schedule_logger.error(f'[EVAL FAILED] {project_name} - {e}')
-                    schedule_logger.error(traceback.format_exc())
-
             results.append({
                 'job': project_name,
                 'status': 'SUCCESS',
                 'elapsed': elapsed,
-                'eval_status': eval_status,
-                'eval_elapsed': eval_elapsed,
-                'eval_error': eval_error,
             })
 
         except Exception as e:
@@ -414,9 +485,6 @@ def main():
                 'status': 'FAILED',
                 'error': str(e),
                 'elapsed': elapsed,
-                'eval_status': 'NOT_RUN',
-                'eval_elapsed': 0.0,
-                'eval_error': '',
             })
             print(f'[ERROR] {e}')
             print('다음 작업으로 넘어갑니다...\n')
@@ -434,15 +502,8 @@ def main():
     print('='*60)
     for r in results:
         elapsed_str = f"{r['elapsed']/3600:.2f}h"
-        eval_str = r.get('eval_status', 'NOT_RUN')
-        eval_elapsed_str = f"{r.get('eval_elapsed', 0.0)/3600:.2f}h"
         if r['status'] == 'SUCCESS':
-            if eval_str == 'SUCCESS':
-                print(f"  [OK] {r['job']}  (train:{elapsed_str}, eval:{eval_elapsed_str})")
-            elif eval_str == 'SKIPPED':
-                print(f"  [OK] {r['job']}  (train:{elapsed_str}, eval:SKIPPED)")
-            else:
-                print(f"  [WARN] {r['job']}  (train:{elapsed_str}, eval:FAILED) -> {r.get('eval_error', '')}")
+            print(f"  [OK] {r['job']}  ({elapsed_str})")
         else:
             print(f"  [FAIL] {r['job']}  ({elapsed_str})  ->  {r.get('error','')}")
     print('='*60)
@@ -450,13 +511,9 @@ def main():
     for r in results:
         elapsed_str = f"{r['elapsed']/3600:.2f}h"
         if r['status'] == 'SUCCESS':
-            eval_status = r.get('eval_status', 'NOT_RUN')
-            eval_elapsed_str = f"{r.get('eval_elapsed', 0.0)/3600:.2f}h"
-            if eval_status == 'FAILED':
-                eval_status = f"FAILED: {r.get('eval_error', '')}"
-            status = f"TRAIN: SUCCESS({elapsed_str}) | EVAL: {eval_status}({eval_elapsed_str})"
+            status = f"TRAIN: SUCCESS({elapsed_str})"
         else:
-            status = f"TRAIN: FAILED({elapsed_str}) - {r.get('error','')} | EVAL: NOT_RUN"
+            status = f"TRAIN: FAILED({elapsed_str}) - {r.get('error','')}"
 
         schedule_logger.info(f"  {r['job']} | {status}")
 

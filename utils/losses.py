@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.functional import cross_entropy
+import math
 
 
 
@@ -75,6 +76,85 @@ def calculate_loss_per_class(class_losses, loss_fn, logits, labels):
             avg_loss = sum(losses) / len(losses)
         else:
             avg_loss = 0.0 
+
+
+class SubCenterArcFace(nn.Module):
+    """Sub-center ArcFace loss.
+
+    각 클래스마다 여러 sub-center를 두고, 클래스 점수는 그중 가장 높은 center로 계산한다.
+    pruning은 warmup 이후에만 수행하며, 한 번에 클래스당 최대 1개만 비활성화한다.
+    """
+
+    def __init__(self, num_classes, feature_dim, num_sub_centers=4, margin=0.3, scale=64.0):
+        super().__init__()
+        self.num_classes = int(num_classes)
+        self.feature_dim = int(feature_dim)
+        self.num_sub_centers = int(num_sub_centers)
+        self.margin = float(margin)
+        self.scale = float(scale)
+
+        self.weight = nn.Parameter(torch.empty(self.num_classes, self.num_sub_centers, self.feature_dim))
+        nn.init.xavier_uniform_(self.weight)
+
+        self.register_buffer('active_mask', torch.ones(self.num_classes, self.num_sub_centers, dtype=torch.bool))
+        self.register_buffer('sub_center_usage', torch.zeros(self.num_classes, self.num_sub_centers))
+
+    def _cosine_logits(self, features):
+        features = F.normalize(features, dim=1)
+        weight = F.normalize(self.weight, dim=2)
+        return torch.einsum('bd,ckd->bck', features, weight)
+
+    def forward(self, features, labels):
+        batch_size = features.size(0)
+        device = features.device
+
+        cosine = self._cosine_logits(features)
+        cosine = cosine.masked_fill(~self.active_mask.unsqueeze(0), -1e4)
+
+        class_logits, class_best_idx = cosine.max(dim=2)
+
+        batch_indices = torch.arange(batch_size, device=device)
+        target_cos = class_logits[batch_indices, labels].clamp(-1.0 + 1e-7, 1.0 - 1e-7)
+        theta = torch.acos(target_cos)
+        class_logits[batch_indices, labels] = torch.cos(theta + self.margin)
+
+        target_center_idx = class_best_idx[batch_indices, labels]
+        self.sub_center_usage[labels, target_center_idx] += 1
+
+        return F.cross_entropy(class_logits * self.scale, labels)
+
+    def prune_unused_subcenters(self, warmup_epochs=3, current_epoch=0, min_usage=1, max_remove_per_class=1):
+        """보수적으로 sub-center를 비활성화한다."""
+        if current_epoch < warmup_epochs:
+            self.sub_center_usage.zero_()
+            return 0
+
+        removed_total = 0
+        with torch.no_grad():
+            for class_idx in range(self.num_classes):
+                active_idx = torch.nonzero(self.active_mask[class_idx], as_tuple=False).flatten()
+                if active_idx.numel() <= 1:
+                    continue
+
+                usage = self.sub_center_usage[class_idx, active_idx]
+                low_usage_order = torch.argsort(usage)
+
+                removed_for_class = 0
+                for order_idx in low_usage_order.tolist():
+                    center_idx = active_idx[order_idx].item()
+                    if usage[order_idx].item() > min_usage:
+                        break
+                    if self.active_mask[class_idx].sum().item() <= 1:
+                        break
+                    self.active_mask[class_idx, center_idx] = False
+                    removed_total += 1
+                    removed_for_class += 1
+                    if removed_for_class >= max_remove_per_class:
+                        break
+
+            self.sub_center_usage.zero_()
+
+        return removed_total
 
 
 class SupConLoss(nn.Module):

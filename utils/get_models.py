@@ -293,6 +293,9 @@ class TransformerHeadClassifier(nn.Module):
             patch_avg = patch_tokens.mean(dim=1)  # [B, D] 
             combined = cls_token + patch_avg
 
+        # Feature extraction mode: Sub-center ArcFace 등에서 사용
+        self._last_feature = combined
+        
         return self.classifier(combined)
         
 

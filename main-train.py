@@ -25,6 +25,14 @@ if __name__ == '__main__':
 
     args = argument()
     args.load(config_path)
+
+    # Stage-2 실험명 구분(체크포인트/로그 덮어쓰기 방지)
+    _use_stage2 = bool(getattr(args, 'use_stage2', False))
+    if _use_stage2 and bool(getattr(args, 'stage2_append_suffix', True)):
+        suffix = str(getattr(args, 'stage2_project_suffix', '_S2_LAST1'))
+        if suffix and not str(args.project_name).endswith(suffix):
+            args.project_name = f"{args.project_name}{suffix}"
+
     DEVICE = torch.device(args.device)
 
     logger = setup_logger('main-train', log_file=f'{args.save_dir}/{args.project_name}/train.log')
@@ -39,11 +47,26 @@ if __name__ == '__main__':
     print(f'**** Model head type : {head_type} ****')
     print(f'**** Pretrained model : {args.pretrained} ****')
     
-    ## if finetunning .. 
-    if args.finetuning != False : 
+    ## if finetunning ..
+    if args.finetuning != False :
         model = get_models.get_finetune_model(model, args)
         logger.info(f'Fine tuning model: {args.project_name}, {args.finetuning_weight}')
         print(f'**** fine tunning model : {args.project_name}, {args.finetuning_weight} ****\n')
+
+    ## ── Stage-2: modi_dino 파인튜닝 백본으로 교체 ─────────────────────────
+    if _use_stage2:
+        _s2_path = getattr(args, 'stage2_backbone_path', '')
+        if _s2_path and os.path.exists(_s2_path):
+            _s2_state = torch.load(_s2_path, map_location='cpu')
+            model.backbone.load_state_dict(_s2_state, strict=False)
+            logger.info(f'[Stage2] Fine-tuned backbone loaded: {_s2_path}')
+        else:
+            logger.warning(f'[Stage2] stage2_backbone_path not found: {_s2_path}')
+        args.max_epoch = int(getattr(args, 'stage2_max_epoch', 12))
+        # Stage-2에서는 backbone에 gradient가 흐르도록 freeze 동작 해제
+        if hasattr(model, 'freeze_backbone'):
+            model.freeze_backbone = False
+    ## ──────────────────────────────────────────────────────────────────────
 
     model.to(DEVICE)
 
@@ -56,14 +79,16 @@ if __name__ == '__main__':
     train_dataset, valid_dataset = datasets.get_dataset(train_data, valid_data, train_labels, valid_labels, args)
     logger.info(f'Dataset loaded: train={len(train_data)}, valid={len(valid_data)}')
 
-    ## Run training 
-    training.run_training(model, 
-                          optimizer, 
-                          scheduler,
-                          train_dataset,
-                          valid_dataset,
-                          args,
-                          logger=logger)
+    ## Run training
+    if _use_stage2:
+        logger.info('[Stage2] Running stage-2 (fine-tuned backbone + LSCE + optional KD)')
+        training.run_stage2_training(model, optimizer, scheduler,
+                                     train_dataset, valid_dataset,
+                                     args, logger=logger)
+    else:
+        training.run_training(model, optimizer, scheduler,
+                              train_dataset, valid_dataset,
+                              args, logger=logger)
 
 
 

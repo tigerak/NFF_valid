@@ -1,8 +1,8 @@
-train_dir: 'C:\Users\LGESLocalAdmin\Desktop\NFF_valid\IMG_DATA\TRAIN_TEST\TRAIN'
-test_dir: 'C:\Users\LGESLocalAdmin\Desktop\NFF_valid\IMG_DATA\TRAIN_TEST\TEST'
-save_dir: 'C:\Users\LGESLocalAdmin\Desktop\NFF_valid\models\save'
-model_dir: 'C:\Users\LGESLocalAdmin\Desktop\NFF_valid\models\pretrained'
-project_name : 'SURFACE_ANODE_DiNO_0727'
+train_dir: 'D:\NFF_ModelDeveloper\IMG_DATA\SURFACE_ANODE\0729_DATA\TRAIN'
+test_dir: 'D:\NFF_ModelDeveloper\IMG_DATA\SURFACE_ANODE\0729_DATA\TEST'
+save_dir: 'D:\NFF_ModelDeveloper\models\save'
+model_dir: 'D:\NFF_ModelDeveloper\models\pretrained'
+project_name : 'SURFACE_ANODE_DiNO_Sum_0729'
 model_name : 'vit_small_patch14_dinov2.lvd142m' ## TIMM type
 pretrained : 'dino_small.bin' 
 head_type : 'transformer'  # transformer | linear | general_gem | effnet_gem | backbone
@@ -19,11 +19,35 @@ num_workers : 12
 accumulation_steps : 1
 focal_gamma: 2.0
 focal_alpha: [1.2, 1.2, 1.5, 1.5, 1., 1., 1., 1., 1., 1., 1.]
+
+## ── Sub-center ArcFace 설정 ────────────────────────────────────────────────
+stage1_loss_mode: 'focal'                 # focal | subcenter_arcface
+num_sub_centers: 4                        # 각 클래스당 서브센터 개수
+arcface_margin: 0.3                       # ArcFace margin
+arcface_scale: 64.0                       # ArcFace scale (logit 스케일)
+arcface_prune_warmup_epochs: 3            # warmup 이후 pruning 시작
+arcface_prune_interval: 2                 # pruning 검사 주기
+arcface_prune_min_usage: 2                # 이 사용량 이하인 center만 후보
+arcface_prune_max_remove_per_class: 1     # 한 번에 클래스당 최대 제거 수
 token_fusion: "sum" # concat | attn | sum | wt_concat
 use_mixup: False   # True
 use_cutmix: False  # 둘 중 하나만 True
 mixup_alpha: 1.0   # Beta 분포의 alpha (클수록 균등, 작을수록 극단)
 use_weighted_sampler: False # True: Sampler | False: Shuffle
+
+## ── Stage-2 설정 ────────────────────────────────────────────────────────────
+use_stage2: False                         # True 로 바꾸면 stage-2 루프 실행
+stage2_backbone_path: 'D:\NFF_ModelDeveloper\models\modi_dino\dino_small.bin'
+stage2_max_epoch: 12
+stage2_label_smoothing: 0.05              # LSCE epsilon
+stage2_kd_alpha: 0.5                      # 0.0 이면 KD 비활성화
+stage2_kd_temperature: 3.0
+stage2_teacher_weight: ''                 # 비우면 save_dir 에서 F1 최고 파일 자동 탐색
+stage2_backbone_lr: 0.000001              # 백본 별도 LR (head lr 은 기존 lr 사용)
+stage2_train_scope: 'last_blocks'         # 'last_blocks' | 'all_backbone'
+stage2_unfreeze_last_n_blocks: 1          # last_blocks일 때 마지막 N개 블록만 학습
+stage2_append_suffix: True                # stage2 실행시 project_name에 suffix 자동 추가
+stage2_project_suffix: '_S2_LAST1'        # ex) '_S2_LAST1', '_S2_ALL'
 
 ## model_name
 # convnextv2_base.fcmae_ft_in22k_in1k
