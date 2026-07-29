@@ -53,6 +53,6 @@ def trim_file_names(dir_path, target_str, keep_target=True):
 
 if __name__ == "__main__":
     # 예시 사용법
-    directory_path = "C:\\Users\\LGESLocalAdmin\\Desktop\\NFF_valid\\IMG_DATA\\TRAIN_TEST\\TEST\\CRATER_2"  # 파일들이 있는 디렉토리 경로
+    directory_path = "D:\\NFF_ModelDeveloper\\IMG_DATA\\SURFACE_ANODE_dev\\TRAIN_TEST"  # 파일들이 있는 디렉토리 경로
     target_string = "_CRACK_2"  # 제거할 기준 문자열
-    trim_file_names(directory_path, target_string, keep_target=True)
+    trim_file_names(directory_path, target_string, keep_target=False)

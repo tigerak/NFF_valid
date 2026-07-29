@@ -14,12 +14,12 @@ img_size: [518, 518]
 labels : ['CRACK_1', 'CRACK_2', 'CRACK_FOIL_1', 'CRACK_FOIL_2', 'CRATER_1', 'CRATER_2', 'DEBRIS', 'PROTRUSION_1', 'PROTRUSION_2','PROTRUSION_3', 'SCRATCH_TINY']
 valid_ratio : 0.1
 datasets_name : "SURFACE_ANODE"
-batch_size : 64
-num_workers : 8
-accumulation_steps : 2
+batch_size : 128
+num_workers : 12
+accumulation_steps : 1
 focal_gamma: 2.0
 focal_alpha: [1.2, 1.2, 1.5, 1.5, 1., 1., 1., 1., 1., 1., 1.]
-token_fusion: "sum" # concat | attn | sum
+token_fusion: "sum" # concat | attn | sum | wt_concat
 use_mixup: False   # True
 use_cutmix: False  # 둘 중 하나만 True
 mixup_alpha: 1.0   # Beta 분포의 alpha (클수록 균등, 작을수록 극단)
