@@ -67,10 +67,10 @@ def build_html_report(report_path, report_items_mismatch, report_items_correct):
         '    <div class="section-title">🔴 Mismatch Samples (True Label ≠ Predicted Label)</div>',
     ])
 
-    for item in report_items_mismatch:
+    for idx, item in enumerate(report_items_mismatch, start=1):
         lines.extend([
             '    <div class="card">',
-            f'      <div class="title"><strong>file_path:</strong> {item["file_path"]}</div>',
+            f'      <div class="title"><strong>오분류 {idx}. csv_file_path:</strong> {item["file_path"]}</div>',
             '      <div class="images">',
             '        <div class="img-wrap">',
             '          <h4>Original</h4>',
@@ -101,10 +101,10 @@ def build_html_report(report_path, report_items_mismatch, report_items_correct):
         '    <div class="section-title">🟢 Correct Samples (True Label = Predicted Label)</div>',
     ])
 
-    for item in report_items_correct:
+    for idx, item in enumerate(report_items_correct, start=1):
         lines.extend([
             '    <div class="card">',
-            f'      <div class="title"><strong>file_path:</strong> {item["file_path"]}</div>',
+            f'      <div class="title"><strong>정분류 {idx}. csv_file_path:</strong> {item["file_path"]}</div>',
             '      <div class="images">',
             '        <div class="img-wrap">',
             '          <h4>Original</h4>',
