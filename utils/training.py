@@ -11,10 +11,6 @@ from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 # Utils
 
 from tqdm import tqdm
-from colorama import Fore, Back, Style
-b_ = Fore.BLUE
-sr_ = Style.RESET_ALL
-
 
 ## custom
 from utils import losses
