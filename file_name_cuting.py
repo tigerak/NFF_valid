@@ -54,5 +54,5 @@ def trim_file_names(dir_path, target_str, keep_target=True):
 if __name__ == "__main__":
     # 예시 사용법
     directory_path = "D:\\0729_IMG"  # 파일들이 있는 디렉토리 경로
-    target_string = '-(Pixel' # "_CRACK_2"  # 제거할 기준 문자열
+    target_string = "-(Pixel" # "-(Pixel" # "_CRACK_2"  # 제거할 기준 문자열
     trim_file_names(directory_path, target_string, keep_target=True)
