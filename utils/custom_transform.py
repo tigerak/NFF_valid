@@ -1,9 +1,11 @@
 import os 
+import io
 import numpy as np 
 import random 
 
 import torch
 import cv2 
+from PIL import Image
 from torchvision import transforms
 from torchvision.transforms import InterpolationMode
 
@@ -23,10 +25,68 @@ class AddGaussianNoise:
 
         if random.random() < self.p :     
             noise = tensor + torch.randn_like(tensor) * self.std + self.mean
-            return torch.clamp(noise, -0.5, 0.5)
+            return torch.clamp(noise, 0.0, 1.0)
 
         else: 
             return tensor
+
+
+class RandomDownscaleRestore:
+    """스케일을 줄였다가 원래 크기로 복원해 크롭 없이 크기 변화 효과를 줍니다."""
+
+    def __init__(self, p=0.5, scale=(0.85, 1.0)):
+        self.p = p
+        self.scale = scale
+
+    def __call__(self, img):
+        if random.random() >= self.p:
+            return img
+
+        width, height = img.size
+        scale_factor = random.uniform(self.scale[0], self.scale[1])
+        resized_width = max(8, int(width * scale_factor))
+        resized_height = max(8, int(height * scale_factor))
+
+        small = img.resize((resized_width, resized_height), resample=Image.BILINEAR)
+        return small.resize((width, height), resample=Image.BILINEAR)
+
+
+class RandomCLAHE:
+    """그레이스케일 특성이 강한 이미지에 지역 대비를 약하게 올립니다."""
+
+    def __init__(self, p=0.25, clip_limit=(1.5, 3.0), tile_grid_size=(8, 8)):
+        self.p = p
+        self.clip_limit = clip_limit
+        self.tile_grid_size = tile_grid_size
+
+    def __call__(self, img):
+        if random.random() >= self.p:
+            return img
+
+        gray = np.array(img.convert("L"))
+        clip_limit = random.uniform(self.clip_limit[0], self.clip_limit[1])
+        clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=self.tile_grid_size)
+        enhanced = clahe.apply(gray)
+        enhanced_rgb = np.stack([enhanced] * 3, axis=-1)
+        return Image.fromarray(enhanced_rgb, mode="RGB")
+
+
+class RandomJPEGCompression:
+    """저장 품질 차이와 압축 아티팩트를 약하게 모사합니다."""
+
+    def __init__(self, p=0.2, quality=(60, 95)):
+        self.p = p
+        self.quality = quality
+
+    def __call__(self, img):
+        if random.random() >= self.p:
+            return img
+
+        quality = random.randint(self.quality[0], self.quality[1])
+        buffer = io.BytesIO()
+        img.save(buffer, format="JPEG", quality=quality)
+        buffer.seek(0)
+        return Image.open(buffer).convert("RGB")
 
 
 def smw_transform(size, mode ='train'):
@@ -143,9 +203,41 @@ def surface_transform(size, mode='train'):
     if mode == 'train':
         transform = transforms.Compose([
             transforms.Resize((size, size)),
+
             transforms.RandomHorizontalFlip(p=0.5),
             transforms.RandomVerticalFlip(p=0.5),
-            transforms.ColorJitter(brightness=0.1, contrast=0.1),
+
+            # 크롭 없이 스케일 변화
+            RandomDownscaleRestore(p=0.5, scale=(0.85, 1.0)),
+
+            # 색 정보보다 명암/질감 차이를 더 중시
+            transforms.RandomApply([
+                transforms.ColorJitter(brightness=0.15, contrast=0.20),
+            ], p=0.5),
+
+            # 경계/선명도 변화
+            transforms.RandomApply([
+                transforms.RandomAdjustSharpness(sharpness_factor=1.5, p=1.0),
+            ], p=0.25),
+
+            # 전체 대비를 약하게 보정하거나 균등화
+            transforms.RandomChoice([
+                transforms.RandomAutocontrast(p=1.0),
+                transforms.RandomEqualize(p=1.0),
+            ]),
+
+            # 지역 대비 향상
+            RandomCLAHE(p=0.25, clip_limit=(1.5, 3.0), tile_grid_size=(8, 8)),
+
+            # 저장/전송 품질 편차
+            RandomJPEGCompression(p=0.2, quality=(60, 95)),
+
+            # 작은 결함을 지우지 않도록 블러는 약하게만
+            transforms.RandomApply([
+                transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 0.8)),
+            ], p=0.15),
+
+            AddGaussianNoise(p=0.15, mean=0., std=0.01),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[1.0, 1.0, 1.0]),
         ])
