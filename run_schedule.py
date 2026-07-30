@@ -128,6 +128,7 @@ SCHEDULE = [
         'overrides': {
             'project_name': STAGE1_SCARC_PROJECT,
             'use_stage2': True,
+            'token_fusion': 'wt_concat',
             'stage1_loss_mode': 'subcenter_arcface',
             'stage2_backbone_path': r'D:\NFF_ModelDeveloper\models\modi_dino\dino_small.bin',
             'stage2_max_epoch': 12,
