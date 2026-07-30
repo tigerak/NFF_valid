@@ -16,6 +16,7 @@ from PIL import Image
 from tqdm import tqdm
 
 from utils import get_models
+from utils import losses
 
 
 # ============================================================================
@@ -254,8 +255,12 @@ def load_model(args, weight_path, device, strict=True):
     """
     model = get_models.build_model(args)
     
+    # 체크포인트는 두 형식을 모두 허용한다.
+    # 1) 구형: raw model.state_dict
+    # 2) 신형: {'model_state_dict': ..., 'arcface_state_dict': ..., ...}
     weight = torch.load(weight_path, map_location=device)
-    model.load_state_dict(weight, strict=strict)
+    model_state = losses.extract_model_state_dict(weight)
+    model.load_state_dict(model_state, strict=strict)
     model.to(device)
     model.eval()
     

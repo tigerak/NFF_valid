@@ -12,6 +12,7 @@ import pandas as pd
 import numpy as np
 import torch
 from tqdm import tqdm
+import torch.nn.functional as F
 
 from evaluation.base_engine import (
     BaseEngine,
@@ -20,6 +21,7 @@ from evaluation.base_engine import (
     export_onnx_model,
     setup_logger,
 )
+from utils import losses
 from evaluation.smw_eval import SMW_extract_patches, SMW_get_result, SMW_get_pred_image
 from evaluation.get_result_summary import (
     build_results_dataframe,
@@ -51,11 +53,39 @@ class StandardEvalEngine(BaseEngine):
         all_confidences = []
         all_logits = []
 
+        # 기본은 classifier logits 평가.
+        # 단, 체크포인트에 arcface_state_dict가 있으면 ArcFace logits 경로로 자동 전환한다.
+        arcface_module = None
+        model_dir = os.path.join(self.args.save_dir, self.args.project_name)
+        checkpoint_path = getattr(self.args, '_current_eval_model_path', None)
+        if checkpoint_path and os.path.exists(checkpoint_path):
+            checkpoint = torch.load(checkpoint_path, map_location=self.args.device)
+            arcface_state = checkpoint.get('arcface_state_dict') if isinstance(checkpoint, dict) else None
+            arcface_cfg = checkpoint.get('arcface_config', {}) if isinstance(checkpoint, dict) else {}
+            if arcface_state is not None and hasattr(model, 'embed_dim'):
+                # 저장된 ArcFace 설정으로 모듈을 복원해 train-time 분류 경로와 일치시킨다.
+                arcface_module = losses.SubCenterArcFace(
+                    num_classes=int(arcface_cfg.get('num_classes', self.args.n_classes)),
+                    feature_dim=int(arcface_cfg.get('feature_dim', model.embed_dim)),
+                    num_sub_centers=int(arcface_cfg.get('num_sub_centers', getattr(self.args, 'num_sub_centers', 4))),
+                    margin=float(arcface_cfg.get('margin', getattr(self.args, 'arcface_margin', 0.3))),
+                    scale=float(arcface_cfg.get('scale', getattr(self.args, 'arcface_scale', 64.0))),
+                ).to(self.args.device)
+                arcface_module.load_state_dict(arcface_state, strict=True)
+                arcface_module.eval()
+                self.logger.info('[Eval] ArcFace checkpoint detected. Using ArcFace logits for prediction.')
+        elif checkpoint_path is None and os.path.isdir(model_dir):
+            self.logger.debug('[Eval] No _current_eval_model_path provided; fallback to classifier logits.')
+
         with torch.no_grad():
             for images, labels, paths in dataloader:
                 images = images.to(self.args.device)
 
                 outputs = model(images)
+                if arcface_module is not None and hasattr(model, '_last_feature'):
+                    # ArcFace checkpoint인 경우 feature->ArcFace logits를 사용한다.
+                    features = F.normalize(model._last_feature, dim=1)
+                    outputs = arcface_module.inference_logits(features)
                 probs = torch.softmax(outputs, dim=1)
                 _, preds = torch.max(outputs, 1)
 
@@ -256,6 +286,8 @@ class EvalManager:
             try:
                 # 모델 로드
                 device = torch.device(self.args.device)
+                # 엔진 내부에서 현재 체크포인트를 직접 읽어 ArcFace 유무를 판단할 수 있도록 경로 전달.
+                self.args._current_eval_model_path = model_path
                 model = load_model(self.args, model_path, device)
                 self.logger.info(f"Model loaded successfully")
 

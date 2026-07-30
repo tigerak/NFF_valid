@@ -41,6 +41,26 @@ def _metrics_from_confusion_matrix(conf_mat):
     return macro_recall, macro_f1, acc
 
 
+def _build_checkpoint_payload(model, sub_center_arcface=None, args=None):
+    # 체크포인트 포맷 통일:
+    # - model_state_dict: 항상 저장 (구/신 로더 공통)
+    # - arcface_state_dict/arcface_config: ArcFace 모드일 때만 저장
+    # 이렇게 저장하면 Stage1/Stage2/eval/inference에서 동일 파일을 재사용할 수 있다.
+    payload = {
+        'model_state_dict': model.state_dict(),
+    }
+    if sub_center_arcface is not None:
+        payload['arcface_state_dict'] = sub_center_arcface.state_dict()
+        payload['arcface_config'] = {
+            'num_classes': int(getattr(sub_center_arcface, 'num_classes', getattr(args, 'n_classes', 0))),
+            'feature_dim': int(getattr(sub_center_arcface, 'feature_dim', 0)),
+            'num_sub_centers': int(getattr(sub_center_arcface, 'num_sub_centers', getattr(args, 'num_sub_centers', 4))),
+            'margin': float(getattr(sub_center_arcface, 'margin', getattr(args, 'arcface_margin', 0.3))),
+            'scale': float(getattr(sub_center_arcface, 'scale', getattr(args, 'arcface_scale', 64.0))),
+        }
+    return payload
+
+
 def run_training(
                 model,
                 optimizer,
@@ -121,6 +141,7 @@ def run_training(
     
     start = time.time()
     best_model_wts = copy.deepcopy(model.state_dict())
+    best_arcface_wts = None
     best_epoch_loss = np.inf
     history = defaultdict(list)
     
@@ -131,6 +152,8 @@ def run_training(
     args.save_json(os.path.join(os.path.join(save_root, 'train_arguments.json')))
 
     # Stage1 loss 선택: focal | subcenter_arcface
+    # ArcFace 모드에서는 "분류기 출력 logits"이 아니라 "feature 공간"이 주요 학습 대상이다.
+    # 따라서 검증/평가도 ArcFace logits 기준으로 맞춰야 metric mismatch를 피할 수 있다.
     stage1_loss_mode = str(getattr(args, 'stage1_loss_mode', 'focal')).lower()
     use_sub_center_arcface = stage1_loss_mode == 'subcenter_arcface'
     sub_center_arcface = None
@@ -156,7 +179,8 @@ def run_training(
         logger.info('[Stage1] Using Focal Loss')
         print('[Stage1] Using Focal Loss')
 
-    # ArcFace 파라미터는 별도 optimizer로 업데이트
+    # ArcFace center 파라미터는 모델 본체와 분리된 별도 모듈이므로
+    # 별도 optimizer를 둬서 함께 step 해준다.
     if sub_center_arcface is not None:
         extra_optimizer = torch.optim.AdamW(
             sub_center_arcface.parameters(),
@@ -195,17 +219,31 @@ def run_training(
             logger=logger,
         )
 
-        val_epoch_loss, val_recall, val_epoch_f1, val_epoch_acc, avg_class_losses = valid_one_epoch(
-            model,
-            optimizer,
-            valid_loader,
-            device=DEVICE,
-            epoch=epoch,
-            num_classes=args.n_classes,
-            logger=logger,
-        )
+        if sub_center_arcface is not None:
+            # ArcFace 모드에서는 validation도 feature->ArcFace logits 경로로 계산한다.
+            val_epoch_loss, val_recall, val_epoch_f1, val_epoch_acc, avg_class_losses = valid_one_epoch_arcface(
+                model,
+                optimizer,
+                valid_loader,
+                device=DEVICE,
+                epoch=epoch,
+                num_classes=args.n_classes,
+                sub_center_arcface=sub_center_arcface,
+                logger=logger,
+            )
+        else:
+            val_epoch_loss, val_recall, val_epoch_f1, val_epoch_acc, avg_class_losses = valid_one_epoch(
+                model,
+                optimizer,
+                valid_loader,
+                device=DEVICE,
+                epoch=epoch,
+                num_classes=args.n_classes,
+                logger=logger,
+            )
 
-        # Sub-center ArcFace: 주기적 pruning (사용되지 않는 sub-center 제거)
+        # Sub-center ArcFace: 주기적 pruning
+        # 사용 빈도가 매우 낮은 sub-center를 제거해 과도한 center 분산을 완화한다.
         if sub_center_arcface is not None:
             prune_interval = int(getattr(args, 'arcface_prune_interval', 2))
             warmup_epochs = int(getattr(args, 'arcface_prune_warmup_epochs', 3))
@@ -232,17 +270,19 @@ def run_training(
 
 
 
-        # deep copy the model
+        # best 갱신 시 model + arcface를 함께 스냅샷한다.
         if best_epoch_loss > val_epoch_loss:
 
             logger.info(f"Validation Loss decreased ({best_epoch_loss} -> {val_epoch_loss})")
             best_epoch_loss = val_epoch_loss
             best_model_wts = copy.deepcopy(model.state_dict())
+            if sub_center_arcface is not None:
+                best_arcface_wts = copy.deepcopy(sub_center_arcface.state_dict())
 
             PATH = "{}/f1_score{:.4f}_Loss{:.7f}_epoch{:.0f}.pth".format(save_root, val_epoch_f1, val_epoch_loss, epoch)
-            torch.save(model.state_dict(), PATH)
+            torch.save(_build_checkpoint_payload(model, sub_center_arcface=sub_center_arcface, args=args), PATH)
 
-            # Save a model file from the current directory
+            # ArcFace 메타를 포함한 통합 체크포인트 저장
             logger.info("Model Saved")
 
         if epoch % 3 == 0:
@@ -250,7 +290,7 @@ def run_training(
             logger.info("Model Saved")
             PATH = "{}/f1_score{:.4f}_Loss{:.7f}_epoch{:.0f}.pth".format(save_root, val_epoch_f1, val_epoch_loss, epoch)
 
-            torch.save(model.state_dict(), PATH)
+            torch.save(_build_checkpoint_payload(model, sub_center_arcface=sub_center_arcface, args=args), PATH)
 
         logger.info(
             "Epoch %d/%d | train_loss=%.6f train_recall=%.4f train_f1=%.4f train_acc=%.4f | "
@@ -272,14 +312,17 @@ def run_training(
         time_elapsed // 3600, (time_elapsed % 3600) // 60, (time_elapsed % 3600) % 60))
     logger.info("Best loss: {:.7f}".format(best_epoch_loss))
 
-    # load best model weights
+    # best weight 복원 (ArcFace가 있으면 ArcFace state도 같이 복원)
     model.load_state_dict(best_model_wts)
+    if sub_center_arcface is not None and best_arcface_wts is not None:
+        sub_center_arcface.load_state_dict(best_arcface_wts)
 
     if args.finetuning != False :
         model = model.merge_and_unload()  # LoRA 병합 및 메모리 해제
 
+    # 최종 best-loss 파일도 동일 체크포인트 포맷으로 저장
     PATH = "{}/Loss{:.7f}.pth".format(save_root, best_epoch_loss)
-    torch.save(model.state_dict(), PATH)
+    torch.save(_build_checkpoint_payload(model, sub_center_arcface=sub_center_arcface, args=args), PATH)
 
     ## save 
     pd.DataFrame(copy.copy(history)).to_csv(os.path.join(save_root, 'train_history.csv'))
@@ -335,6 +378,7 @@ def train_one_epoch(model, optimizer, scheduler, dataloader, device, epoch, args
         focal_alpha = getattr(args, 'focal_alpha', 0.25)
 
         # Loss 계산: Sub-center ArcFace 또는 Focal Loss
+        # ArcFace 모드에서는 model._last_feature를 사용해 center-margin 분류를 수행한다.
         if sub_center_arcface is not None:
             # Sub-center ArcFace 사용 (feature 사용)
             if hasattr(model, '_last_feature'):
@@ -347,7 +391,8 @@ def train_one_epoch(model, optimizer, scheduler, dataloader, device, epoch, args
                     else:
                         loss = loss_a
                 except Exception as e:
-                    # ArcFace 계산 중 예외가 나면 해당 step은 Focal Loss로 안전하게 진행
+                    # ArcFace 계산이 일시적으로 실패하면 학습 중단 대신 Focal로 안전 fallback.
+                    # 원인 로그는 epoch당 1회만 출력해 로그 폭주를 막는다.
                     if not arcface_fallback_notified:
                         warn_msg = (
                             f"[경고] Epoch {epoch}: Sub-center ArcFace 계산 중 문제 발생으로 "
@@ -365,7 +410,7 @@ def train_one_epoch(model, optimizer, scheduler, dataloader, device, epoch, args
                     else:
                         loss = losses.focal_loss(outputs, targets, alpha=focal_alpha, gamma=focal_gamma)
             else:
-                # feature 추출 실패 시 Focal Loss로 fallback
+                # feature 추출 실패 시에도 동일하게 Focal fallback.
                 if not arcface_fallback_notified:
                     warn_msg = (
                         f"[경고] Epoch {epoch}: Sub-center ArcFace용 feature(_last_feature) 추출 실패로 "
@@ -400,6 +445,7 @@ def train_one_epoch(model, optimizer, scheduler, dataloader, device, epoch, args
         if (step + 1) % accumulation_steps == 0 or (step + 1) == len(dataloader):
             optimizer.step()
             if extra_optimizer is not None:
+            # ArcFace center optimizer도 동일 타이밍에 step.
                 extra_optimizer.step()
             optimizer.zero_grad()
             if extra_optimizer is not None:
@@ -497,6 +543,87 @@ def valid_one_epoch(model, optimizer, dataloader, device, epoch, num_classes, lo
             print(f"Epoch {epoch}: {avg_class_losses}")
         gc.collect()
         
+    return epoch_loss, epoch_recall, epoch_f1, epoch_acc, avg_class_losses
+
+
+def valid_one_epoch_arcface(model, optimizer, dataloader, device, epoch, num_classes, sub_center_arcface, logger=None):
+    """ArcFace 전용 validation.
+
+    핵심 차이:
+    - 일반 valid_one_epoch는 model classifier logits 기준
+    - 본 함수는 feature -> ArcFace logits(inference mode) 기준
+
+    ArcFace 학습의 목적함수와 동일한 의사결정 경로를 검증에 사용해
+    metric mismatch를 제거한다.
+    """
+    with torch.inference_mode():
+
+        model.eval()
+        sub_center_arcface.eval()
+
+        dataset_size = 0
+        running_loss = 0.0
+        conf_mat = torch.zeros((num_classes, num_classes), dtype=torch.long, device=device)
+        class_loss_sum = torch.zeros(num_classes, dtype=torch.float32, device=device)
+        class_counts = torch.zeros(num_classes, dtype=torch.float32, device=device)
+
+        bar = tqdm(enumerate(dataloader), total=len(dataloader), ascii=True)
+        for step, data in bar:
+
+            patch, label = data[0], data[1]
+            images = patch.to(device, dtype=torch.float32, non_blocking=True)
+            targets = label.to(device, non_blocking=True)
+
+            batch_size = images.size(0)
+
+            # model forward로 최신 feature를 생성한다.
+            # TransformerHeadClassifier는 forward 시 _last_feature를 갱신한다.
+            _ = model(images)
+            if not hasattr(model, '_last_feature'):
+                raise RuntimeError('ArcFace validation requires model._last_feature, but it was not found.')
+
+            # ArcFace는 cosine 기반이므로 feature 정규화를 명시적으로 유지.
+            features = F.normalize(model._last_feature, dim=1)
+            logits = sub_center_arcface.inference_logits(features)
+
+            per_sample_loss = torch.nn.functional.cross_entropy(logits, targets, reduction='none')
+            preds = torch.argmax(logits, dim=1)
+
+            _update_confusion_matrix(conf_mat, targets.long(), preds.long(), num_classes)
+
+            class_loss_sum.index_add_(0, targets.long(), per_sample_loss)
+            class_counts.index_add_(0, targets.long(), torch.ones_like(per_sample_loss))
+
+            running_loss += per_sample_loss.sum().item()
+            dataset_size += batch_size
+
+            epoch_loss = running_loss / dataset_size
+
+            bar.set_postfix(Epoch=epoch, Valid_Loss=epoch_loss, LR=optimizer.param_groups[0]['lr'])
+
+            if logger is not None and (step + 1) == len(dataloader):
+                logger.info(
+                    "[Valid-ArcFace] epoch=%d step=%d/%d loss=%.6f lr=%.8f",
+                    epoch,
+                    step + 1,
+                    len(dataloader),
+                    epoch_loss,
+                    optimizer.param_groups[0]['lr'],
+                )
+
+        epoch_recall, epoch_f1, epoch_acc = _metrics_from_confusion_matrix(conf_mat)
+
+        avg_class_losses = {
+            k: (class_loss_sum[k] / class_counts[k]).item() if class_counts[k] > 0 else 'no samples'
+            for k in range(num_classes)
+        }
+        if logger is not None:
+            logger.info(f"[Valid-ArcFace] Epoch {epoch}: {avg_class_losses}")
+        else:
+            print(f"[Valid-ArcFace] Epoch {epoch}: {avg_class_losses}")
+
+        gc.collect()
+
     return epoch_loss, epoch_recall, epoch_f1, epoch_acc, avg_class_losses
 
 
@@ -618,7 +745,10 @@ def valid_one_epoch_contrastive(model, supcon_criterion, ce_criterion, loader, d
 # =============================================================================
 
 def _find_best_stage1_ckpt(save_root):
-    """save_root 에서 f1_score*.pth 중 F1 최고 파일 경로 반환."""
+    """save_root 에서 f1_score*.pth 중 F1 최고 파일 경로 반환.
+
+    Stage-2 KD teacher를 지정하지 않았을 때 자동 선택에 사용한다.
+    """
     import glob as _glob
     candidates = _glob.glob(os.path.join(save_root, 'f1_score*_Loss*_epoch*.pth'))
     if not candidates:
@@ -634,7 +764,13 @@ def _find_best_stage1_ckpt(save_root):
 
 
 def _build_stage2_optimizer(model, args):
-    """백본 / head 에 각각 다른 LR 을 적용하는 옵티마이저 생성."""
+    """백본 / head 에 각각 다른 LR 을 적용하는 옵티마이저 생성.
+
+    일반적으로 Stage-2에서는
+    - backbone: 매우 작은 LR (파괴적 업데이트 방지)
+    - head: 상대적으로 큰 LR (빠른 도메인 적응)
+    전략을 사용한다.
+    """
     backbone_lr = float(getattr(args, 'stage2_backbone_lr', 1e-6))
     head_lr     = float(args.lr)
     wd          = float(args.weight_decay)
@@ -666,6 +802,7 @@ def _set_stage2_trainable_blocks(model, args, logger=None):
     unfreeze_n = int(getattr(args, 'stage2_unfreeze_last_n_blocks', 1))
 
     # 먼저 backbone 전체 freeze
+    # 이후 scope 설정에 따라 필요한 블록만 다시 unfreeze한다.
     for p in model.backbone.parameters():
         p.requires_grad = False
 
@@ -677,6 +814,7 @@ def _set_stage2_trainable_blocks(model, args, logger=None):
         return
 
     # 기본: last_blocks
+    # 모델 구현별로 block 컨테이너 이름이 다를 수 있어 blocks/stages를 순서대로 확인한다.
     blocks = None
     if hasattr(model.backbone, 'blocks'):
         blocks = model.backbone.blocks
@@ -692,6 +830,7 @@ def _set_stage2_trainable_blocks(model, args, logger=None):
         return
 
     n_total = len(blocks)
+    # 최소 1개 블록은 열고, 최대 전체 블록 수를 넘지 않게 clamp.
     n = max(1, min(unfreeze_n, n_total))
     for blk in list(blocks)[-n:]:
         for p in blk.parameters():
@@ -702,7 +841,13 @@ def _set_stage2_trainable_blocks(model, args, logger=None):
 
 
 def run_stage2_training(model, optimizer, scheduler, train_dataset, valid_dataset, args, logger=None):
-    """Stage-2: fine-tuned backbone + LSCE + optional KD (stage-1 teacher)."""
+    """Stage-2 학습 루프.
+
+    목표:
+    - Stage-1 결과를 teacher로 활용(optional KD)
+    - LSCE(label smoothing CE)로 head calibration 강화
+    - backbone 일부만 미세 조정해 일반화 성능 개선
+    """
     import torch.nn.functional as _F
     from torch.optim import lr_scheduler as _lr_sched
 
@@ -747,20 +892,26 @@ def run_stage2_training(model, optimizer, scheduler, train_dataset, valid_datase
     )
 
     # ── 백본/head 분리 옵티마이저 + cosine scheduler ──────────────────────
+    # 입력 optimizer/scheduler는 Stage-1 기본 경로 호환용이고,
+    # Stage-2에서는 별도 정책(s2_optimizer/s2_scheduler)을 사용한다.
     s2_optimizer = _build_stage2_optimizer(model, args)
     s2_scheduler = _lr_sched.CosineAnnealingLR(
         s2_optimizer, T_max=num_epochs, eta_min=float(args.min_lr)
     )
 
     # ── Teacher 로드 (KD용) ──────────────────────────────────────────────
+    # teacher_weight가 비어 있으면 save_root에서 best stage1 ckpt를 자동 탐색.
+    # 체크포인트 포맷은 raw/new dict 모두 허용한다.
     teacher = None
     teacher_weight = getattr(args, 'stage2_teacher_weight', '') or ''
     if not teacher_weight:
         teacher_weight = _find_best_stage1_ckpt(save_root) or ''
 
     if teacher_weight and os.path.exists(teacher_weight):
+        # student와 동일 구조로 teacher 객체를 만든 뒤 weight만 주입한다.
         teacher = copy.deepcopy(model)
         state = torch.load(teacher_weight, map_location=device)
+        state = losses.extract_model_state_dict(state)
         try:
             teacher.load_state_dict(state, strict=True)
         except RuntimeError as e:
@@ -782,6 +933,7 @@ def run_stage2_training(model, optimizer, scheduler, train_dataset, valid_datase
         kd_alpha = 0.0
         logger.warning('[Stage2] Teacher not found - KD disabled.')
 
+    # Stage-2 기본 supervised loss: Label Smoothing CE
     ce_criterion = torch.nn.CrossEntropyLoss(label_smoothing=ls_eps)
 
     backbone_lr = float(getattr(args, 'stage2_backbone_lr', 1e-6))
@@ -814,10 +966,12 @@ def run_stage2_training(model, optimizer, scheduler, train_dataset, valid_datase
             targets = data[1].to(device, non_blocking=True)
             batch_size = images.size(0)
 
+            # student forward
             student_logits = model(images)
             ce_loss = ce_criterion(student_logits, targets)
 
             if teacher is not None and kd_alpha > 0.0:
+                # KD loss: KL(student||teacher), temperature scaling 적용.
                 with torch.no_grad():
                     teacher_logits = teacher(images)
                 T = kd_temperature
@@ -826,6 +980,7 @@ def run_stage2_training(model, optimizer, scheduler, train_dataset, valid_datase
                     _F.softmax(teacher_logits / T, dim=1),
                     reduction='batchmean',
                 ) * (T * T)
+                # CE와 KD를 가중합한다.
                 total_loss = (1.0 - kd_alpha) * ce_loss + kd_alpha * kd_loss
             else:
                 total_loss = ce_loss
@@ -854,6 +1009,7 @@ def run_stage2_training(model, optimizer, scheduler, train_dataset, valid_datase
         train_recall, train_f1, train_acc = _metrics_from_confusion_matrix(conf_mat)
 
         # ── Validation ─────────────────────────────────────────────────────
+        # Stage-2는 classifier supervised objective이므로 CE 기반 valid_one_epoch 사용.
         val_epoch_loss, val_recall, val_f1, val_acc, avg_class_losses = valid_one_epoch(
             model, s2_optimizer, valid_loader,
             device=device, epoch=epoch,
