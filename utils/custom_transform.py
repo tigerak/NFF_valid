@@ -235,8 +235,8 @@ def surface_transform(size, mode='train'):
                 transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 0.8)),
             ], p=0.15),
 
-            AddGaussianNoise(p=0.15, mean=0., std=0.01),
             transforms.ToTensor(),
+            AddGaussianNoise(p=0.15, mean=0., std=0.01),
             transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[1.0, 1.0, 1.0]),
         ])
     else:
