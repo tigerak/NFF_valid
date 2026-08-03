@@ -17,8 +17,8 @@ USE_CODE_INPUTS = True
 # - list 형태: ["path1.csv", "path2.csv", "folder_path"]
 # - dict 형태: {"run_name": "path_or_folder", ...}
 CODE_INPUTS: list[str] | dict[str, str] = {
-	# "sum": r"D:\\NFF_ModelDeveloper\\models\\save\\SURFACE_ANODE_DiNO_Sum_0730\\train_history.csv",
-	# "arcface": r"D:\\NFF_ModelDeveloper\\models\\save\\SURFACE_ANODE_DiNO_Concat_SCArc_0730\\train_history.csv",
+	"sum_fa05": r"D:\\NFF_ModelDeveloper\\models\\save\\0803_SURFACE_ANODE_DiNO_Sum_FA05\\train_history.csv",
+	"sum_fa025": r"D:\\NFF_ModelDeveloper\\models\\save\\0803_SURFACE_ANODE_DiNO_Sum_FA025\\train_history.csv",
 }
 
 CODE_OPTIONS = {
@@ -36,6 +36,18 @@ METRIC_PAIRS = {
 	"f1": ("Train f1", "Valid f1"),
 	"ACC": ("Train_ACC", "Valid ACC"),
 }
+
+
+# train_history.csv의 모니터링 컬럼(존재하는 항목만 자동 표시)
+MONITOR_COLUMNS = [
+	"Grad Norm",
+	"Focal Grad Norm",
+	"ArcFace Grad Norm",
+	"Delta Theta Norm",
+	"Update Ratio",
+	"Attention Entropy",
+	"Grad Cosim Focal ArcFace",
+]
 
 
 def _read_history(csv_path: Path) -> pd.DataFrame:
@@ -80,11 +92,12 @@ def _smooth(series: pd.Series, window: int) -> pd.Series:
 def plot_single_run(
 	csv_path: Path,
 	out_dir: Path,
+	run_label: str | None = None,
 	smooth_window: int = 1,
 	dpi: int = 140,
 ) -> None:
 	df = _read_history(csv_path)
-	run_name = csv_path.stem
+	run_name = run_label if run_label else csv_path.stem
 
 	# 1) 한 장에 모든 metric pair(Train/Valid) subplot
 	fig, axes = plt.subplots(2, 2, figsize=(14, 9), constrained_layout=True)
@@ -101,7 +114,7 @@ def plot_single_run(
 		ax.legend()
 
 	fig.suptitle(f"Training Curves: {run_name}", fontsize=13)
-	save_path = out_dir / f"{_sanitize_name(run_name)}_all_metrics.png"
+	save_path = out_dir / f"single_{_sanitize_name(run_name)}_all_metrics.png"
 	fig.savefig(save_path, dpi=dpi)
 	plt.close(fig)
 
@@ -116,13 +129,25 @@ def plot_single_run(
 		_style_plot(ax, f"{run_name} | {base_name}")
 		ax.legend()
 
-		save_path = out_dir / f"{_sanitize_name(run_name)}_{_sanitize_name(base_name)}.png"
+		save_path = out_dir / f"single_{_sanitize_name(run_name)}_{_sanitize_name(base_name)}.png"
+		fig.savefig(save_path, dpi=dpi)
+		plt.close(fig)
+
+	# 3) 모니터링 metric(grad/entropy/cosim) 개별 그림
+	monitor_cols = [c for c in MONITOR_COLUMNS if c in df.columns]
+	for col in monitor_cols:
+		fig, ax = plt.subplots(figsize=(8, 5), constrained_layout=True)
+		ax.plot(df["epoch"], _smooth(df[col], smooth_window), label=col, linewidth=2)
+		_style_plot(ax, f"{run_name} | {col}")
+		ax.legend()
+
+		save_path = out_dir / f"single_{_sanitize_name(run_name)}_{_sanitize_name(col)}.png"
 		fig.savefig(save_path, dpi=dpi)
 		plt.close(fig)
 
 
 def plot_multi_run_compare(
-	csv_paths: list[Path],
+	entries: list[tuple[str, Path]],
 	out_dir: Path,
 	compare_metric: str = "Valid f1",
 	smooth_window: int = 1,
@@ -131,39 +156,51 @@ def plot_multi_run_compare(
 	# 여러 run에서 한 metric만 겹쳐 비교
 	fig, ax = plt.subplots(figsize=(10, 6), constrained_layout=True)
 	has_any = False
+	missing_labels: list[str] = []
 
-	for csv_path in csv_paths:
+	for run_label, csv_path in entries:
 		df = _read_history(csv_path)
 		if compare_metric not in df.columns:
+			missing_labels.append(run_label)
 			continue
 
-		run_name = csv_path.stem
 		ax.plot(
 			df["epoch"],
 			_smooth(df[compare_metric], smooth_window),
-			label=run_name,
+			label=run_label,
 			linewidth=2,
 		)
 		has_any = True
 
 	if not has_any:
+		if missing_labels:
+			print(
+				f"[WARN] compare_metric '{compare_metric}' not found in: "
+				+ ", ".join(missing_labels)
+			)
 		plt.close(fig)
 		return
+
+	if missing_labels:
+		print(
+			f"[WARN] compare_metric '{compare_metric}' not found in: "
+			+ ", ".join(missing_labels)
+		)
 
 	_style_plot(ax, f"Multi-run Comparison | {compare_metric}")
 	ax.legend()
 
-	save_path = out_dir / f"compare_{_sanitize_name(compare_metric)}.png"
+	save_path = out_dir / f"compare_{_sanitize_name(compare_metric)}_labeled.png"
 	fig.savefig(save_path, dpi=dpi)
 	plt.close(fig)
 
 
-def print_summary_table(csv_paths: list[Path]) -> None:
+def print_summary_table(entries: list[tuple[str, Path]]) -> None:
 	rows = []
 
-	for csv_path in csv_paths:
+	for run_label, csv_path in entries:
 		df = _read_history(csv_path)
-		row = {"run": csv_path.stem, "epochs": len(df)}
+		row = {"run": run_label, "epochs": len(df)}
 
 		for key, (_, valid_col) in METRIC_PAIRS.items():
 			if valid_col in df.columns:
@@ -296,56 +333,23 @@ def main() -> None:
 		plot_single_run(
 			csv_path=csv_path,
 			out_dir=out_dir,
+			run_label=run_label,
 			smooth_window=max(1, smooth_window),
 			dpi=dpi,
 		)
 
-		# 파일명 stem 대신 사용자가 넣은 라벨로 별도 대표 그래프 1장 추가
-		df = _read_history(csv_path)
-		fig, axes = plt.subplots(2, 2, figsize=(14, 9), constrained_layout=True)
-		axes = axes.flatten()
-		for ax, (base_name, (train_col, valid_col)) in zip(axes, METRIC_PAIRS.items()):
-			if train_col not in df.columns or valid_col not in df.columns:
-				ax.set_visible(False)
-				continue
-			ax.plot(df["epoch"], _smooth(df[train_col], max(1, smooth_window)), label=train_col, linewidth=2)
-			ax.plot(df["epoch"], _smooth(df[valid_col], max(1, smooth_window)), label=valid_col, linewidth=2)
-			_style_plot(ax, f"{run_label} | {base_name}")
-			ax.legend()
-		fig.suptitle(f"Training Curves: {run_label}", fontsize=13)
-		fig.savefig(out_dir / f"{_sanitize_name(run_label)}_all_metrics.png", dpi=dpi)
-		plt.close(fig)
-
 	# 여러 run 비교 그래프 생성
 	if len(entries) >= 2:
-		# 기존 함수 재사용을 위해 path list를 구성하되,
-		# 별칭 라벨 비교 그래프는 아래에서 한 번 더 그린다.
-		csv_paths = [p for _, p in entries]
 		plot_multi_run_compare(
-			csv_paths=csv_paths,
+			entries=entries,
 			out_dir=out_dir,
 			compare_metric=compare_metric,
 			smooth_window=max(1, smooth_window),
 			dpi=dpi,
 		)
 
-		fig, ax = plt.subplots(figsize=(10, 6), constrained_layout=True)
-		has_any = False
-		for run_label, csv_path in entries:
-			df = _read_history(csv_path)
-			if compare_metric not in df.columns:
-				continue
-			ax.plot(df["epoch"], _smooth(df[compare_metric], max(1, smooth_window)), label=run_label, linewidth=2)
-			has_any = True
-		if has_any:
-			_style_plot(ax, f"Multi-run Comparison | {compare_metric}")
-			ax.legend()
-			fig.savefig(out_dir / f"compare_{_sanitize_name(compare_metric)}_labeled.png", dpi=dpi)
-		plt.close(fig)
-
 	# 콘솔 요약표 출력
-	csv_paths = [p for _, p in entries]
-	print_summary_table(csv_paths)
+	print_summary_table(entries)
 
 	print(f"\nGraphs saved to: {out_dir.resolve()}")
 

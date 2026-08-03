@@ -2,3 +2,4 @@ __pycache__/
 IMG_DATA/
 models/
 *.log
+graph_outputs/
