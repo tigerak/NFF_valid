@@ -1,5 +1,6 @@
 import pandas as pd
 from sklearn.metrics import accuracy_score, confusion_matrix, f1_score
+import re
 
 
 def normalize_smw_label(label_idx):
@@ -51,3 +52,27 @@ def summarize_classification_results(results_df, label_names, display_order=None
 def save_results_dataframe(results_df, save_path):
     results_df.to_csv(save_path, index=False)
     return save_path
+
+
+def collapse_label_name(label_name):
+    """클래스명 끝의 _숫자 접미사를 제거해 상위 라벨로 통합.
+
+    예) CRACK_1 -> CRACK, CRACK_FOIL_2 -> CRACK_FOIL, PROTRUSION_3 -> PROTRUSION
+    """
+    if label_name is None:
+        return label_name
+    return re.sub(r'_(\d+)$', '', str(label_name))
+
+
+def summarize_collapsed_label_results(results_df):
+    """true/pred 라벨명을 접미사 통합 후 Custom Accuracy/F1(Macro) 계산."""
+    collapsed_true = results_df['true_label_name'].map(collapse_label_name)
+    collapsed_pred = results_df['pred_label_name'].map(collapse_label_name)
+
+    custom_accuracy = accuracy_score(collapsed_true, collapsed_pred)
+    custom_f1_macro = f1_score(collapsed_true, collapsed_pred, average='macro')
+
+    return {
+        'custom_accuracy': custom_accuracy,
+        'custom_f1_macro': custom_f1_macro,
+    }

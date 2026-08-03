@@ -27,6 +27,7 @@ from evaluation.get_result_summary import (
     build_results_dataframe,
     normalize_smw_label,
     summarize_classification_results,
+    summarize_collapsed_label_results,
     save_results_dataframe,
 )
 
@@ -318,9 +319,12 @@ class EvalManager:
                     label_names=summary_label_names,
                     display_order=cm_display_order,
                 )
+                custom_summary = summarize_collapsed_label_results(results_df)
 
                 self.logger.info(f"Accuracy: {summary['accuracy']:.4f}")
                 self.logger.info(f"F1 Score (Macro): {summary['f1_macro']:.4f}")
+                self.logger.info(f"Custom Acc (Collapsed): {custom_summary['custom_accuracy']:.4f}")
+                self.logger.info(f"Custom F1 (Macro, Collapsed): {custom_summary['custom_f1_macro']:.4f}")
                 self.logger.info(f"\n[ Confusion Matrix ]")
                 self.logger.info(f"\n{summary['cm_df']}")
 
@@ -335,6 +339,7 @@ class EvalManager:
                 eval_results[model_name] = {
                     'results_df': results_df,
                     'summary': summary,
+                    'custom_summary': custom_summary,
                     'model_path': model_path,
                 }
 
