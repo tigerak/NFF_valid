@@ -61,6 +61,38 @@ def _build_checkpoint_payload(model, sub_center_arcface=None, args=None):
     return payload
 
 
+def _resolve_stage1_loss_weights(args, epoch, num_epochs):
+    """Return (focal_weight, arcface_weight) for current epoch.
+
+    Modes:
+    - focal: focal only
+    - subcenter_arcface: arcface only
+    - focal_arcface_schedule: focal only (early/late), focal+arcface (mid)
+    """
+    mode = str(getattr(args, 'stage1_loss_mode', 'focal')).lower()
+
+    if mode == 'focal':
+        return 1.0, 0.0
+    if mode == 'subcenter_arcface':
+        return 0.0, 1.0
+
+    if mode == 'focal_arcface_schedule':
+        focal_w = float(getattr(args, 'hybrid_focal_weight', 1.0))
+        arcface_w = float(getattr(args, 'hybrid_arcface_weight', 0.1))
+
+        start_epoch = int(getattr(args, 'hybrid_arcface_start_epoch', max(2, num_epochs // 5)))
+        end_epoch = int(getattr(args, 'hybrid_arcface_end_epoch', max(start_epoch, num_epochs - max(1, num_epochs // 5))))
+
+        start_epoch = max(1, min(start_epoch, num_epochs))
+        end_epoch = max(start_epoch, min(end_epoch, num_epochs))
+
+        if start_epoch <= epoch <= end_epoch:
+            return focal_w, arcface_w
+        return focal_w, 0.0
+
+    return 1.0, 0.0
+
+
 def run_training(
                 model,
                 optimizer,
@@ -155,7 +187,8 @@ def run_training(
     # ArcFace 모드에서는 "분류기 출력 logits"이 아니라 "feature 공간"이 주요 학습 대상이다.
     # 따라서 검증/평가도 ArcFace logits 기준으로 맞춰야 metric mismatch를 피할 수 있다.
     stage1_loss_mode = str(getattr(args, 'stage1_loss_mode', 'focal')).lower()
-    use_sub_center_arcface = stage1_loss_mode == 'subcenter_arcface'
+    use_sub_center_arcface = stage1_loss_mode in ('subcenter_arcface', 'focal_arcface_schedule')
+    use_arcface_only_validation = stage1_loss_mode == 'subcenter_arcface'
     sub_center_arcface = None
     if use_sub_center_arcface:
         num_sub_centers = int(getattr(args, 'num_sub_centers', 4))
@@ -178,6 +211,20 @@ def run_training(
     else:
         logger.info('[Stage1] Using Focal Loss')
         print('[Stage1] Using Focal Loss')
+
+    if stage1_loss_mode == 'focal_arcface_schedule':
+        start_epoch = int(getattr(args, 'hybrid_arcface_start_epoch', max(2, num_epochs // 5)))
+        end_epoch = int(getattr(args, 'hybrid_arcface_end_epoch', max(start_epoch, num_epochs - max(1, num_epochs // 5))))
+        focal_w = float(getattr(args, 'hybrid_focal_weight', 1.0))
+        arcface_w = float(getattr(args, 'hybrid_arcface_weight', 0.1))
+        logger.info(
+            '[Stage1] Hybrid schedule enabled: early focal -> mid focal+arcface -> late focal | '
+            'start=%d end=%d focal_w=%.3f arcface_w=%.3f',
+            start_epoch,
+            end_epoch,
+            focal_w,
+            arcface_w,
+        )
 
     # ArcFace center 파라미터는 모델 본체와 분리된 별도 모듈이므로
     # 별도 optimizer를 둬서 함께 step 해준다.
@@ -219,7 +266,7 @@ def run_training(
             logger=logger,
         )
 
-        if sub_center_arcface is not None:
+        if use_arcface_only_validation and sub_center_arcface is not None:
             # ArcFace 모드에서는 validation도 feature->ArcFace logits 경로로 계산한다.
             val_epoch_loss, val_recall, val_epoch_f1, val_epoch_acc, avg_class_losses = valid_one_epoch_arcface(
                 model,
@@ -249,7 +296,15 @@ def run_training(
             warmup_epochs = int(getattr(args, 'arcface_prune_warmup_epochs', 3))
             prune_min_usage = int(getattr(args, 'arcface_prune_min_usage', 2))
             prune_max_remove = int(getattr(args, 'arcface_prune_max_remove_per_class', 1))
-            if epoch >= warmup_epochs and epoch % prune_interval == 0:
+
+            # Hybrid 모드에서는 ArcFace가 실제로 켜진 epoch에서만 pruning을 수행한다.
+            if stage1_loss_mode == 'focal_arcface_schedule':
+                _, current_arcface_weight = _resolve_stage1_loss_weights(args, epoch, num_epochs)
+                arcface_active_epoch = current_arcface_weight > 0.0
+            else:
+                arcface_active_epoch = True
+
+            if arcface_active_epoch and epoch >= warmup_epochs and epoch % prune_interval == 0:
                 removed = sub_center_arcface.prune_unused_subcenters(
                     warmup_epochs=warmup_epochs,
                     current_epoch=epoch,
@@ -352,6 +407,7 @@ def train_one_epoch(model, optimizer, scheduler, dataloader, device, epoch, args
     
     log_interval = int(getattr(args, 'log_interval', 100))
     arcface_fallback_notified = False
+    focal_weight, arcface_weight = _resolve_stage1_loss_weights(args, epoch, int(getattr(args, 'max_epoch', 1)))
 
     for step, data in bar:
         
@@ -377,64 +433,55 @@ def train_one_epoch(model, optimizer, scheduler, dataloader, device, epoch, args
         focal_gamma = getattr(args, 'focal_gamma', 2.0)
         focal_alpha = getattr(args, 'focal_alpha', 0.25)
 
-        # Loss 계산: Sub-center ArcFace 또는 Focal Loss
-        # ArcFace 모드에서는 model._last_feature를 사용해 center-margin 분류를 수행한다.
-        if sub_center_arcface is not None:
-            # Sub-center ArcFace 사용 (feature 사용)
+        # Focal branch loss (classifier logits)
+        if targets_b is not None:
+            focal_a = losses.focal_loss(outputs, targets_a, alpha=focal_alpha, gamma=focal_gamma)
+            focal_b = losses.focal_loss(outputs, targets_b, alpha=focal_alpha, gamma=focal_gamma)
+            focal_loss_value = lam * focal_a + (1 - lam) * focal_b
+        else:
+            focal_loss_value = losses.focal_loss(outputs, targets, alpha=focal_alpha, gamma=focal_gamma)
+
+        # ArcFace branch loss (feature space)
+        arcface_loss_value = None
+        if sub_center_arcface is not None and arcface_weight > 0.0:
             if hasattr(model, '_last_feature'):
                 try:
                     features = F.normalize(model._last_feature, dim=1)
-                    loss_a = sub_center_arcface(features, targets_a)
+                    arc_a = sub_center_arcface(features, targets_a)
                     if targets_b is not None:
-                        loss_b = sub_center_arcface(features, targets_b)
-                        loss = lam * loss_a + (1 - lam) * loss_b
+                        arc_b = sub_center_arcface(features, targets_b)
+                        arcface_loss_value = lam * arc_a + (1 - lam) * arc_b
                     else:
-                        loss = loss_a
+                        arcface_loss_value = arc_a
                 except Exception as e:
-                    # ArcFace 계산이 일시적으로 실패하면 학습 중단 대신 Focal로 안전 fallback.
-                    # 원인 로그는 epoch당 1회만 출력해 로그 폭주를 막는다.
                     if not arcface_fallback_notified:
                         warn_msg = (
                             f"[경고] Epoch {epoch}: Sub-center ArcFace 계산 중 문제 발생으로 "
-                            f"Focal Loss로 대체합니다. 원인: {e}"
+                            f"ArcFace 분기 가중치를 0으로 처리합니다. 원인: {e}"
                         )
                         print(warn_msg)
                         if logger is not None:
                             logger.warning(warn_msg)
                         arcface_fallback_notified = True
-
-                    if targets_b is not None:
-                        loss_a = losses.focal_loss(outputs, targets_a, alpha=focal_alpha, gamma=focal_gamma)
-                        loss_b = losses.focal_loss(outputs, targets_b, alpha=focal_alpha, gamma=focal_gamma)
-                        loss = lam * loss_a + (1 - lam) * loss_b
-                    else:
-                        loss = losses.focal_loss(outputs, targets, alpha=focal_alpha, gamma=focal_gamma)
             else:
-                # feature 추출 실패 시에도 동일하게 Focal fallback.
                 if not arcface_fallback_notified:
                     warn_msg = (
                         f"[경고] Epoch {epoch}: Sub-center ArcFace용 feature(_last_feature) 추출 실패로 "
-                        "Focal Loss로 대체합니다."
+                        "ArcFace 분기 가중치를 0으로 처리합니다."
                     )
                     print(warn_msg)
                     if logger is not None:
                         logger.warning(warn_msg)
                     arcface_fallback_notified = True
 
-                if targets_b is not None:
-                    loss_a = losses.focal_loss(outputs, targets_a, alpha=focal_alpha, gamma=focal_gamma)
-                    loss_b = losses.focal_loss(outputs, targets_b, alpha=focal_alpha, gamma=focal_gamma)
-                    loss = lam * loss_a + (1 - lam) * loss_b
-                else:
-                    loss = losses.focal_loss(outputs, targets, alpha=focal_alpha, gamma=focal_gamma)
+        if arcface_loss_value is not None:
+            loss = focal_weight * focal_loss_value + arcface_weight * arcface_loss_value
         else:
-            # Focal Loss 사용 (기존 방식)
-            if targets_b is not None:
-                loss_a = losses.focal_loss(outputs, targets_a, alpha=focal_alpha, gamma=focal_gamma)
-                loss_b = losses.focal_loss(outputs, targets_b, alpha=focal_alpha, gamma=focal_gamma)
-                loss = lam * loss_a + (1 - lam) * loss_b
-            else:
-                loss = losses.focal_loss(outputs, targets, alpha=focal_alpha, gamma=focal_gamma)
+            loss = focal_weight * focal_loss_value
+
+        if loss.detach().item() == 0.0:
+            # 안전장치: 모든 가중치가 0인 잘못된 설정이면 focal loss로 fallback.
+            loss = focal_loss_value
         # ========== Mixup/Cutmix 적용 끝 ==========
 
         loss = loss / accumulation_steps  # Gradient Accumulation: loss 스케일링
