@@ -252,7 +252,7 @@ def run_training(
             logger.info(f"Current Pinhole gen Prob : {current_p}...")
 
         accumulation_steps = getattr(args, 'accumulation_steps', 1)
-        train_epoch_loss, train_recall, train_epoch_f1, train_epoch_acc = train_one_epoch(
+        train_epoch_loss, train_recall, train_epoch_f1, train_epoch_acc, grad_stat = train_one_epoch(
             model,
             optimizer,
             scheduler,
@@ -322,6 +322,13 @@ def run_training(
         history['Valid f1'].append(val_epoch_f1)
         history['Train_ACC'].append(train_epoch_acc)
         history['Valid ACC'].append(val_epoch_acc)
+        history['Grad Norm'].append(grad_stat.get('grad_norm', np.nan))
+        history['Delta Theta Norm'].append(grad_stat.get('delta_theta_norm', np.nan))
+        history['Update Ratio'].append(grad_stat.get('update_ratio', np.nan))
+        history['Attention Entropy'].append(grad_stat.get('attention_entropy', np.nan))
+        history['Grad Cosim Focal ArcFace'].append(grad_stat.get('grad_cosim_focal_arcface', np.nan))
+        history['Focal Grad Norm'].append(grad_stat.get('focal_grad_norm', np.nan))
+        history['ArcFace Grad Norm'].append(grad_stat.get('arcface_grad_norm', np.nan))
 
 
 
@@ -393,6 +400,17 @@ def train_one_epoch(model, optimizer, scheduler, dataloader, device, epoch, args
     running_loss = 0.0
     num_classes = args.n_classes
     conf_mat = torch.zeros((num_classes, num_classes), dtype=torch.long, device=device)
+
+    # Gradient 모니터링용 누적 리스트
+    grad_norms = []
+    delta_norms = []
+    update_ratios = []
+    attn_entropies = []
+    grad_cosims = []
+    
+    # Hybrid 모드 각각의 그래디언트 분리 모니터링
+    focal_grad_norms = []
+    arcface_grad_norms = []
 
     bar = tqdm(enumerate(dataloader), total=len(dataloader), ascii= True)
     optimizer.zero_grad()  # 초기화
@@ -484,21 +502,141 @@ def train_one_epoch(model, optimizer, scheduler, dataloader, device, epoch, args
             loss = focal_loss_value
         # ========== Mixup/Cutmix 적용 끝 ==========
 
+        # Hybrid 모드에서 focal/arcface feature-gradient 정렬도 측정
+        if (
+            arcface_loss_value is not None
+            and focal_weight > 0.0
+            and arcface_weight > 0.0
+            and hasattr(model, '_last_feature')
+            and model._last_feature is not None
+            and model._last_feature.requires_grad
+        ):
+            try:
+                feature_ref = model._last_feature
+                focal_grad = torch.autograd.grad(
+                    focal_loss_value,
+                    feature_ref,
+                    retain_graph=True,
+                    allow_unused=True,
+                )[0]
+                arcface_grad = torch.autograd.grad(
+                    arcface_loss_value,
+                    feature_ref,
+                    retain_graph=True,
+                    allow_unused=True,
+                )[0]
+                if focal_grad is not None and arcface_grad is not None:
+                    focal_flat = focal_grad.detach().reshape(focal_grad.size(0), -1)
+                    arcface_flat = arcface_grad.detach().reshape(arcface_grad.size(0), -1)
+                    cos = F.cosine_similarity(focal_flat, arcface_flat, dim=1).mean().item()
+                    if np.isfinite(cos):
+                        grad_cosims.append(cos)
+            except Exception:
+                pass
+
         loss = loss / accumulation_steps  # Gradient Accumulation: loss 스케일링
 
-        loss.backward()
+        # ========== Hybrid 모드: 각 loss의 그래디언트 분리 계산 ==========
+        if (
+            arcface_loss_value is not None
+            and focal_weight > 0.0
+            and arcface_weight > 0.0
+        ):
+            # focal loss만 역전파해서 gradient 저장
+            (focal_weight * focal_loss_value / accumulation_steps).backward(retain_graph=True)
+            
+            # Focal 그래디언트 노름 계산
+            focal_trainable_params = [p for p in model.parameters() if p.requires_grad and p.grad is not None]
+            focal_grad_sq = torch.zeros(1, device=device)
+            for p in focal_trainable_params:
+                focal_grad_sq += torch.sum(p.grad.detach() * p.grad.detach())
+            focal_grad_norm = torch.sqrt(focal_grad_sq).item()
+            if np.isfinite(focal_grad_norm) and len(focal_trainable_params) > 0:
+                focal_grad_norms.append(focal_grad_norm)
+            
+            # Focal 그래디언트 저장 후 zero_grad
+            optimizer.zero_grad()
+            if extra_optimizer is not None:
+                extra_optimizer.zero_grad()
+            
+            # arcface loss만 역전파
+            (arcface_weight * arcface_loss_value / accumulation_steps).backward(retain_graph=True)
+            
+            # ArcFace 그래디언트 노름 계산
+            arcface_trainable_params = [p for p in model.parameters() if p.requires_grad and p.grad is not None]
+            arcface_grad_sq = torch.zeros(1, device=device)
+            for p in arcface_trainable_params:
+                arcface_grad_sq += torch.sum(p.grad.detach() * p.grad.detach())
+            arcface_grad_norm = torch.sqrt(arcface_grad_sq).item()
+            if np.isfinite(arcface_grad_norm) and len(arcface_trainable_params) > 0:
+                arcface_grad_norms.append(arcface_grad_norm)
+            
+            # ArcFace 그래디언트 저장 후 zero_grad
+            optimizer.zero_grad()
+            if extra_optimizer is not None:
+                extra_optimizer.zero_grad()
+            
+            # 혼합 loss로 실제 역전파 (optimizer step용)
+            loss.backward()
+        else:
+            # Focal only 모드
+            loss.backward()
+        # ========================================================
 
         # Gradient Accumulation: accumulation_steps마다 optimizer step
         if (step + 1) % accumulation_steps == 0 or (step + 1) == len(dataloader):
+            trainable_params = [p for p in model.parameters() if p.requires_grad]
+
+            grad_sq = torch.zeros(1, device=device)
+            for p in trainable_params:
+                if p.grad is not None:
+                    grad_sq += torch.sum(p.grad.detach() * p.grad.detach())
+            grad_norm = torch.sqrt(grad_sq).item()
+            if np.isfinite(grad_norm):
+                grad_norms.append(grad_norm)
+
+            param_sq_before = torch.zeros(1, device=device)
+            params_before = []
+            for p in trainable_params:
+                p_detached = p.detach()
+                param_sq_before += torch.sum(p_detached * p_detached)
+                params_before.append(p_detached.clone())
+            param_norm_before = torch.sqrt(param_sq_before).item()
+
             optimizer.step()
             if extra_optimizer is not None:
             # ArcFace center optimizer도 동일 타이밍에 step.
                 extra_optimizer.step()
+
+            delta_sq = torch.zeros(1, device=device)
+            for p, p_before in zip(trainable_params, params_before):
+                diff = p.detach() - p_before
+                delta_sq += torch.sum(diff * diff)
+            delta_norm = torch.sqrt(delta_sq).item()
+            if np.isfinite(delta_norm):
+                delta_norms.append(delta_norm)
+            if param_norm_before > 0:
+                ratio = delta_norm / (param_norm_before + 1e-12)
+                if np.isfinite(ratio):
+                    update_ratios.append(ratio)
+
             optimizer.zero_grad()
             if extra_optimizer is not None:
                 extra_optimizer.zero_grad()
             if scheduler is not None:
                 scheduler.step()
+
+        # token_fusion(attn/wt_concat)에서 저장된 attention 분포 엔트로피
+        if hasattr(model, '_last_attn_weights') and model._last_attn_weights is not None:
+            try:
+                attn = model._last_attn_weights.detach()
+                if attn.ndim == 2 and attn.size(1) > 1:
+                    attn_safe = attn.clamp(min=1e-12)
+                    entropy = (-(attn_safe * torch.log(attn_safe)).sum(dim=1)).mean().item()
+                    if np.isfinite(entropy):
+                        attn_entropies.append(entropy)
+            except Exception:
+                pass
 
         # 메트릭 계산 (targets_a 기준)
         targets_for_metric = targets_a if targets_b is not None else targets
@@ -526,7 +664,28 @@ def train_one_epoch(model, optimizer, scheduler, dataloader, device, epoch, args
     
     epoch_recall, epoch_f1, epoch_acc = _metrics_from_confusion_matrix(conf_mat)
 
-    return epoch_loss, epoch_recall, epoch_f1, epoch_acc
+    grad_stat = {
+        'grad_norm': float(np.mean(grad_norms)) if len(grad_norms) > 0 else np.nan,
+        'delta_theta_norm': float(np.mean(delta_norms)) if len(delta_norms) > 0 else np.nan,
+        'update_ratio': float(np.mean(update_ratios)) if len(update_ratios) > 0 else np.nan,
+        'attention_entropy': float(np.mean(attn_entropies)) if len(attn_entropies) > 0 else np.nan,
+        'grad_cosim_focal_arcface': float(np.mean(grad_cosims)) if len(grad_cosims) > 0 else np.nan,
+        'focal_grad_norm': float(np.mean(focal_grad_norms)) if len(focal_grad_norms) > 0 else np.nan,
+        'arcface_grad_norm': float(np.mean(arcface_grad_norms)) if len(arcface_grad_norms) > 0 else np.nan,
+    }
+
+    if logger is not None:
+        logger.info(
+            '[Train-Monitor] epoch=%d grad_norm=%.6e delta_theta_norm=%.6e update_ratio=%.6e attn_entropy=%.6e grad_cosim=%.6e',
+            epoch,
+            grad_stat['grad_norm'] if np.isfinite(grad_stat['grad_norm']) else float('nan'),
+            grad_stat['delta_theta_norm'] if np.isfinite(grad_stat['delta_theta_norm']) else float('nan'),
+            grad_stat['update_ratio'] if np.isfinite(grad_stat['update_ratio']) else float('nan'),
+            grad_stat['attention_entropy'] if np.isfinite(grad_stat['attention_entropy']) else float('nan'),
+            grad_stat['grad_cosim_focal_arcface'] if np.isfinite(grad_stat['grad_cosim_focal_arcface']) else float('nan'),
+        )
+
+    return epoch_loss, epoch_recall, epoch_f1, epoch_acc, grad_stat
 
 def valid_one_epoch(model, optimizer, dataloader, device, epoch, num_classes, logger=None):
     with torch.inference_mode():

@@ -268,6 +268,7 @@ class TransformerHeadClassifier(nn.Module):
             keys = self.k_proj(patch_tokens)  # [B, N-1, D]
             attn_weights = torch.einsum('bd, bnd -> bn', query, keys)  # [B, N-1]
             attn_weights = torch.softmax(attn_weights / (self.embed_dim ** 0.5), dim=1)  # [B, N-1]
+            self._last_attn_weights = attn_weights
 
             patch_avg = torch.einsum('bn, bnd -> bd', attn_weights, patch_tokens)  # [B, D]
 
@@ -284,6 +285,7 @@ class TransformerHeadClassifier(nn.Module):
             keys = self.k_proj(patch_tokens)  # [B, N-1, D]
             attn_weights = torch.einsum('bd, bnd -> bn', query, keys)  # [B, N-1]
             attn_weights = torch.softmax(attn_weights / (self.embed_dim ** 0.5), dim=1)  # [B, N-1]
+            self._last_attn_weights = attn_weights
 
             patch_summary = torch.einsum('bn, bnd -> bd', attn_weights, patch_tokens)  # [B, D]
             combined = torch.cat([cls_token, patch_summary], dim=1)  # [B, 2*D]
