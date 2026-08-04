@@ -290,6 +290,12 @@ class TransformerHeadClassifier(nn.Module):
             patch_summary = torch.einsum('bn, bnd -> bd', attn_weights, patch_tokens)  # [B, D]
             combined = torch.cat([cls_token, patch_summary], dim=1)  # [B, 2*D]
             combined = self.concat_fusion(combined)  # [B, D]
+        elif self.token_fusion == 'cls_only':
+            combined = cls_token
+        elif self.token_fusion == 'sum05':
+            # cls_token과 patch_avg를 단순 평균
+            patch_avg = patch_tokens.mean(dim=1)  # [B, D]
+            combined = 0.5 * cls_token + 0.5 * patch_avg
         else:
             # 단순 평균 풀링 (*0.5도 안 함 <- 초기 버전)
             patch_avg = patch_tokens.mean(dim=1)  # [B, D] 
