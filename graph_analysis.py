@@ -16,14 +16,25 @@ USE_CODE_INPUTS = True
 # 비교할 CSV 소스:
 # - list 형태: ["path1.csv", "path2.csv", "folder_path"]
 # - dict 형태: {"run_name": "path_or_folder", ...}
+def get_path_input(dir_name) -> Path:
+	formatted_dir = f"D:\\NFF_ModelDeveloper\\models\\save\\{dir_name}\\train_history.csv"
+	return Path(formatted_dir)
+
 CODE_INPUTS: list[str] | dict[str, str] = {
-	"sum_fa05": r"D:\\NFF_ModelDeveloper\\models\\save\\0803_SURFACE_ANODE_DiNO_Sum_FA05\\train_history.csv",
-	"sum_fa025": r"D:\\NFF_ModelDeveloper\\models\\save\\0803_SURFACE_ANODE_DiNO_Sum_FA025\\train_history.csv",
+	"attn_fa1": get_path_input("0803_SURFACE_ANODE_DiNO_WtAttn_FA1"),
+	"attn_fa05": get_path_input("0803_SURFACE_ANODE_DiNO_WtAttn_FA05"),
+	"attn_fa025": get_path_input("0803_SURFACE_ANODE_DiNO_WtAttn_FA025"),
+	"concat_fa1": get_path_input("0803_SURFACE_ANODE_DiNO_WtConcat_FA1"),
+	"concat_fa05": get_path_input("0803_SURFACE_ANODE_DiNO_WtConcat_FA05"),
+	"concat_fa025": get_path_input("0803_SURFACE_ANODE_DiNO_WtConcat_FA025"),
+	"concat_hy_fa05_m01_s16": get_path_input("0803_SURFACE_ANODE_DiNO_WtConcat_FA05_Hybrid_ArcFace_M01_S16"),
+	"attn_hy_fa05_m01_s16": get_path_input("0804_SURFACE_ANODE_DiNO_WtAttn_FA05_Hybrid_ArcFace_M01_S16"),
 }
 
 CODE_OPTIONS = {
 	"out_dir": "graph_outputs",
 	"compare_metric": "Valid f1",
+	"compare_all_metrics": True,
 	"smooth_window": 1,
 	"dpi": 140,
 }
@@ -47,6 +58,7 @@ MONITOR_COLUMNS = [
 	"Update Ratio",
 	"Attention Entropy",
 	"Grad Cosim Focal ArcFace",
+	"Fusion Alpha",
 ]
 
 
@@ -157,6 +169,7 @@ def plot_multi_run_compare(
 	fig, ax = plt.subplots(figsize=(10, 6), constrained_layout=True)
 	has_any = False
 	missing_labels: list[str] = []
+	compare_frames: list[pd.DataFrame] = []
 
 	for run_label, csv_path in entries:
 		df = _read_history(csv_path)
@@ -164,12 +177,14 @@ def plot_multi_run_compare(
 			missing_labels.append(run_label)
 			continue
 
+		series = _smooth(df[compare_metric], smooth_window)
 		ax.plot(
 			df["epoch"],
-			_smooth(df[compare_metric], smooth_window),
+			series,
 			label=run_label,
 			linewidth=2,
 		)
+		compare_frames.append(pd.DataFrame({"epoch": df["epoch"], run_label: series}))
 		has_any = True
 
 	if not has_any:
@@ -193,6 +208,50 @@ def plot_multi_run_compare(
 	save_path = out_dir / f"compare_{_sanitize_name(compare_metric)}_labeled.png"
 	fig.savefig(save_path, dpi=dpi)
 	plt.close(fig)
+
+	# 비교 이미지에 실제 사용된 run_label만 epoch 기준으로 모아 CSV 저장
+	compare_df = compare_frames[0]
+	for frame in compare_frames[1:]:
+		compare_df = compare_df.merge(frame, on="epoch", how="outer")
+	compare_df = compare_df.sort_values("epoch").reset_index(drop=True)
+
+	compare_csv_path = out_dir / f"compare_{_sanitize_name(compare_metric)}_labeled.csv"
+	compare_df.to_csv(compare_csv_path, index=False)
+
+
+def get_compare_metrics(entries: list[tuple[str, Path]]) -> list[str]:
+	"""다중 run 비교 대상 metric 목록을 구성한다.
+
+	- Train/Valid pair 컬럼
+	- 모니터링 컬럼
+	중 실제 CSV에 존재하는 항목만 반환한다.
+	"""
+	candidates: list[str] = []
+
+	for train_col, valid_col in METRIC_PAIRS.values():
+		candidates.append(train_col)
+		candidates.append(valid_col)
+
+	for col in MONITOR_COLUMNS:
+		candidates.append(col)
+
+	# 실제 존재하는 컬럼만 필터링
+	present_cols = set()
+	for _, csv_path in entries:
+		df = _read_history(csv_path)
+		present_cols.update(df.columns.tolist())
+
+	metrics = [c for c in candidates if c in present_cols]
+
+	# 순서 유지 중복 제거
+	unique = []
+	seen = set()
+	for m in metrics:
+		if m not in seen:
+			seen.add(m)
+			unique.append(m)
+
+	return unique
 
 
 def print_summary_table(entries: list[tuple[str, Path]]) -> None:
@@ -288,6 +347,19 @@ def parse_args() -> argparse.Namespace:
 		help="여러 파일 비교 시 겹쳐 그릴 컬럼명 (기본: Valid f1)",
 	)
 	parser.add_argument(
+		"--compare-all-metrics",
+		dest="compare_all_metrics",
+		action="store_true",
+		help="여러 파일 비교 시 가능한 모든 metric을 run 간 비교 그래프로 생성",
+	)
+	parser.add_argument(
+		"--single-compare-metric",
+		dest="compare_all_metrics",
+		action="store_false",
+		help="여러 파일 비교 시 compare-metric 하나만 생성",
+	)
+	parser.set_defaults(compare_all_metrics=True)
+	parser.add_argument(
 		"--smooth-window",
 		type=int,
 		default=1,
@@ -309,12 +381,14 @@ def main() -> None:
 		entries = collect_labeled_entries(CODE_INPUTS)
 		out_dir = Path(CODE_OPTIONS.get("out_dir", "graph_outputs"))
 		compare_metric = str(CODE_OPTIONS.get("compare_metric", "Valid f1"))
+		compare_all_metrics = bool(CODE_OPTIONS.get("compare_all_metrics", True))
 		smooth_window = int(CODE_OPTIONS.get("smooth_window", 1))
 		dpi = int(CODE_OPTIONS.get("dpi", 140))
 	else:
 		entries = collect_labeled_entries(args.inputs)
 		out_dir = Path(args.out_dir)
 		compare_metric = args.compare_metric
+		compare_all_metrics = bool(args.compare_all_metrics)
 		smooth_window = args.smooth_window
 		dpi = args.dpi
 
@@ -340,13 +414,26 @@ def main() -> None:
 
 	# 여러 run 비교 그래프 생성
 	if len(entries) >= 2:
-		plot_multi_run_compare(
-			entries=entries,
-			out_dir=out_dir,
-			compare_metric=compare_metric,
-			smooth_window=max(1, smooth_window),
-			dpi=dpi,
-		)
+		if compare_all_metrics:
+			all_metrics = get_compare_metrics(entries)
+			if not all_metrics:
+				print("[WARN] No comparable metrics found across input CSV files.")
+			for metric in all_metrics:
+				plot_multi_run_compare(
+					entries=entries,
+					out_dir=out_dir,
+					compare_metric=metric,
+					smooth_window=max(1, smooth_window),
+					dpi=dpi,
+				)
+		else:
+			plot_multi_run_compare(
+				entries=entries,
+				out_dir=out_dir,
+				compare_metric=compare_metric,
+				smooth_window=max(1, smooth_window),
+				dpi=dpi,
+			)
 
 	# 콘솔 요약표 출력
 	print_summary_table(entries)

@@ -329,6 +329,11 @@ def run_training(
         history['Grad Cosim Focal ArcFace'].append(grad_stat.get('grad_cosim_focal_arcface', np.nan))
         history['Focal Grad Norm'].append(grad_stat.get('focal_grad_norm', np.nan))
         history['ArcFace Grad Norm'].append(grad_stat.get('arcface_grad_norm', np.nan))
+        if hasattr(model, 'fusion_logit'):
+            fusion_alpha = torch.sigmoid(model.fusion_logit.detach()).item()
+        else:
+            fusion_alpha = np.nan
+        history['Fusion Alpha'].append(fusion_alpha)
 
 
 
