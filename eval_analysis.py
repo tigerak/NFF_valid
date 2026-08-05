@@ -1,5 +1,6 @@
 ﻿import os
 import math
+import json
 import numpy as np
 import pandas as pd
 import torch
@@ -17,6 +18,58 @@ from evaluation.eval import setup_logger
 from evaluation.base_engine import load_model
 
 
+# run_schedule.py 스타일: 기본 config + 필요한 값만 override
+ANALYSIS_JOB = {
+    'config': './config/SURFACE_ANODE_classification.yaml',
+    'overrides': {
+        'project_name': '0804_SURFACE_ANODE_DiNO_CLS_FA05',
+        'token_fusion': 'cls_only',
+        'stage1_loss_mode': 'focal',
+        'focal_alpha': [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5],
+    },
+    # 특정 체크포인트 파일명 지정 시 해당 .pth만 분석 (예: 'f1_score0.95_Loss0.12_epoch30.pth')
+    # 비워두면 project_name 디렉토리의 모든 .pth를 분석
+    # 'target_pth_name': '',
+    'target_pth_name': 'f1_score0.8667_Loss0.3926265_epoch39.pth',
+    # train_arguments.json 동기화 사용 여부
+    'use_train_arguments_sync': True,
+    # 동기화 시에도 로컬 실행 경로는 유지(덮어쓰기 방지)
+    'preserve_path_keys': ['save_dir', 'model_dir', 'train_dir', 'test_dir', 'device'],
+}
+
+
+def apply_overrides(args, overrides):
+    for key, value in (overrides or {}).items():
+        setattr(args, key, value)
+
+
+def sync_args_from_training_artifact(args, logger, preserve_keys=None):
+    """학습 시 저장된 train_arguments.json을 불러와 추론 설정 불일치를 방지한다."""
+    preserve_keys = preserve_keys or []
+    preserved = {k: getattr(args, k) for k in preserve_keys if hasattr(args, k)}
+
+    train_args_path = os.path.join(args.save_dir, args.project_name, 'train_arguments.json')
+    if not os.path.exists(train_args_path):
+        logger.warning(f'train_arguments.json not found: {train_args_path}')
+        return
+
+    with open(train_args_path, 'r', encoding='utf-8') as f:
+        trained_args = json.load(f)
+
+    if not isinstance(trained_args, dict):
+        logger.warning(f'Invalid train_arguments.json format: {train_args_path}')
+        return
+
+    for key, value in trained_args.items():
+        setattr(args, key, value)
+
+    # 로컬 실행 경로/디바이스는 유지
+    for key, value in preserved.items():
+        setattr(args, key, value)
+
+    logger.info(f'Synced args from training artifact: {train_args_path}')
+
+
 def find_latest_file(directory, pattern):
     """디렉토리 내 패턴 파일 중 최신 수정 파일 경로 반환"""
     import glob
@@ -25,6 +78,49 @@ def find_latest_file(directory, pattern):
     if not candidates:
         return None
     return max(candidates, key=os.path.getmtime)
+
+
+def resolve_model_jobs(project_root, target_pth_name, logger):
+    """분석 대상 모델/CSV 목록 결정.
+
+    - target_pth_name 지정: 해당 .pth 1개만
+    - target_pth_name 미지정: 디렉토리 내 모든 .pth
+    """
+    import glob
+
+    target_name = str(target_pth_name or '').strip()
+
+    if target_name:
+        if not target_name.lower().endswith('.pth'):
+            target_name = f'{target_name}.pth'
+
+        model_path = os.path.join(project_root, target_name)
+        if not os.path.exists(model_path):
+            raise RuntimeError(f'Target model not found: {model_path}')
+
+        csv_path = model_path + '.csv'
+        csv_files = [csv_path] if os.path.exists(csv_path) else []
+        if not csv_files:
+            logger.warning(f'CSV not found for target model: {csv_path}')
+
+        return [(model_path, csv_files)]
+
+    model_paths = sorted(glob.glob(os.path.join(project_root, '*.pth')))
+    if not model_paths:
+        raise RuntimeError(f'No .pth file found in {project_root}')
+
+    jobs = []
+    for model_path in model_paths:
+        csv_path = model_path + '.csv'
+        if os.path.exists(csv_path):
+            jobs.append((model_path, [csv_path]))
+        else:
+            logger.warning(f'Skipping model without matched CSV: {model_path}')
+
+    if not jobs:
+        raise RuntimeError(f'No matched .csv found for .pth files in {project_root}')
+
+    return jobs
 
 
 def build_html_report(report_path, report_items_mismatch, report_items_correct):
@@ -260,17 +356,28 @@ def overlay_attention(image: Image.Image, attention_map: np.ndarray, alpha=0.5):
 
 def main():
     """Transformer attention 시각화 실행 스크립트 - 모든 CSV 파일 처리"""
-    import glob
-    
-    config_path = './config/SURFACE_ANODE_classification.yaml'
-    # config_path = './config/SURFACE_CATHODE_classification.yaml'
-    # config_path = './config/SMW_classification.yaml'
+    config_path = ANALYSIS_JOB.get('config', './config/SURFACE_ANODE_classification.yaml')
+    overrides = ANALYSIS_JOB.get('overrides', {})
+    target_pth_name = ANALYSIS_JOB.get('target_pth_name', '')
+    use_train_sync = bool(ANALYSIS_JOB.get('use_train_arguments_sync', True))
+    preserve_path_keys = ANALYSIS_JOB.get('preserve_path_keys', ['save_dir', 'model_dir', 'train_dir', 'test_dir', 'device'])
 
     args = argument()
     args.load(config_path)
+    apply_overrides(args, overrides)
+
+    # project_name 기준으로 학습 당시 인자 동기화 (구조 mismatch 방지)
+    if use_train_sync:
+        tmp_logger = setup_logger('eval-analysis-bootstrap')
+        sync_args_from_training_artifact(args, tmp_logger, preserve_keys=preserve_path_keys)
+    # 의도적으로 지정한 값은 train_arguments 로드 후에도 우선 적용
+    apply_overrides(args, overrides)
 
     logger = setup_logger('eval-analysis', log_file=f'{args.save_dir}/{args.project_name}/analysis.log')
     logger.info(f'Loaded config: {config_path}')
+    logger.info(f'Applied overrides: {overrides}')
+    logger.info(f'use_train_arguments_sync: {use_train_sync}')
+    logger.info(f'preserve_path_keys: {preserve_path_keys}')
     logger.info(f'Pretrained model: {args.pretrained}')
 
     filenames_total, label_total = collect_test_data(args)
@@ -282,157 +389,160 @@ def main():
 
     project_root = os.path.join(args.save_dir, args.project_name)
 
-    # 분석 대상 모델(.pth) 자동 선택: 최신 파일
-    model_path = find_latest_file(project_root, '*.pth')
-    if model_path is None:
-        raise RuntimeError(f'No .pth file found in {project_root}')
-    logger.info(f'Selected model: {model_path}')
-
-    # 모든 CSV 파일 찾기
-    csv_files = sorted(glob.glob(os.path.join(project_root, '*.csv')))
-    if not csv_files:
-        raise RuntimeError(f'No evaluation CSV found in {project_root}')
-    
-    logger.info(f'Found {len(csv_files)} CSV files to process')
-
-    device = torch.device(args.device)
-    model = load_model(args, model_path, device, strict=False)
-    model.to(device)
-    model.eval()
-
-    if str(getattr(model, 'token_fusion', 'sum')).lower() == 'attn' and hasattr(model, 'fusion_logit'):
-        alpha = torch.sigmoid(model.fusion_logit.detach()).item()
-        logger.info(f'Fusion weight (alpha): {alpha:.4f}')
+    model_jobs = resolve_model_jobs(project_root, target_pth_name, logger)
+    if str(target_pth_name).strip():
+        logger.info(f'Target mode: single checkpoint | {target_pth_name}')
     else:
-        logger.info('Fusion weight (alpha): not applicable for this token_fusion mode')
+        logger.info(f'Target mode: all checkpoints | count={len(model_jobs)}')
 
     save_root_base = os.path.join(args.save_dir, args.project_name, 'analysis_attention')
     os.makedirs(save_root_base, exist_ok=True)
 
-    # 각 CSV 파일에 대해 처리
-    for csv_path in csv_files:
-        csv_name = os.path.splitext(os.path.basename(csv_path))[0]
-        save_root = os.path.join(save_root_base, csv_name)
-        os.makedirs(save_root, exist_ok=True)
+    device = torch.device(args.device)
 
-        logger.info(f'\n========== Processing CSV: {csv_path} ==========')
-        logger.info(f'Save folder: {save_root}')
-        
-        eval_df = pd.read_csv(csv_path)
+    for model_path, csv_files in model_jobs:
+        model_name = os.path.splitext(os.path.basename(model_path))[0]
+        logger.info(f'\n========== Processing model: {model_path} ==========')
 
-        required_base_cols = {'file_path', 'true_label_name', 'pred_label_name'}
-        missing_cols = [c for c in required_base_cols if c not in eval_df.columns]
-        if missing_cols:
-            logger.error(f'Missing required columns in CSV {csv_path}: {missing_cols}')
+        model = load_model(args, model_path, device, strict=False)
+        model.to(device)
+        model.eval()
+
+        if str(getattr(model, 'token_fusion', 'sum')).lower() == 'attn' and hasattr(model, 'fusion_logit'):
+            alpha = torch.sigmoid(model.fusion_logit.detach()).item()
+            logger.info(f'Fusion weight (alpha): {alpha:.4f}')
+        else:
+            logger.info('Fusion weight (alpha): not applicable for this token_fusion mode')
+
+        if not csv_files:
+            logger.warning(f'No CSV to analyze for model: {model_path}')
             continue
 
-        confidence_cols = [c for c in eval_df.columns if c.startswith('confidence_')]
-        if len(confidence_cols) == 0:
-            logger.warning(f'No confidence_* columns found in CSV {csv_path}. Skipping.')
-            continue
+        model_save_root = os.path.join(save_root_base, model_name)
+        os.makedirs(model_save_root, exist_ok=True)
 
-        # Mismatch (true_label_name != pred_label_name) 샘플
-        mismatch_df = eval_df[eval_df['true_label_name'] != eval_df['pred_label_name']].copy()
-        logger.info(f'Mismatch samples found: {len(mismatch_df)}')
+        for csv_path in csv_files:
+            csv_name = os.path.splitext(os.path.basename(csv_path))[0]
+            save_root = model_save_root
 
-        # Correct (true_label_name == pred_label_name) 샘플
-        correct_df = eval_df[eval_df['true_label_name'] == eval_df['pred_label_name']].copy()
-        logger.info(f'Correct samples found: {len(correct_df)}')
+            logger.info(f'\n========== Processing CSV: {csv_path} ==========')
+            logger.info(f'Save folder: {save_root}')
 
-        # 메타 컬럼 선택: true_label_name, pred_label_name, confidence_*
-        meta_cols = ['true_label_name', 'pred_label_name'] + confidence_cols
+            eval_df = pd.read_csv(csv_path)
 
-        report_items_mismatch = []
-        report_items_correct = []
-
-        # Mismatch 처리
-        for _, row in mismatch_df.iterrows():
-            file_path = row['file_path']
-            if file_path not in path_to_index:
-                logger.warning(f'CSV path not found in dataset list: {file_path}')
+            required_base_cols = {'file_path', 'true_label_name', 'pred_label_name'}
+            missing_cols = [c for c in required_base_cols if c not in eval_df.columns]
+            if missing_cols:
+                logger.error(f'Missing required columns in CSV {csv_path}: {missing_cols}')
                 continue
 
-            image_tensor, label, path = dataset[path_to_index[file_path]]
-            image_tensor = image_tensor.to(device)
-
-            with torch.no_grad():
-                outputs = model(image_tensor.unsqueeze(0))
-                probs = torch.softmax(outputs, dim=1)
-                pred = torch.argmax(probs, dim=1).item()
-
-            attention_map = compute_transformer_attention(model, image_tensor, tuple(args.img_size))
-            original_image = Image.open(path).convert('RGB').resize(tuple(args.img_size))
-            overlay = overlay_attention(original_image, attention_map, alpha=0.5)
-
-            base_name = os.path.splitext(os.path.basename(path))[0]
-
-            original_name = f'mismatch_{base_name}_orig.png'
-            original_path = os.path.join(save_root, original_name)
-            original_image.save(original_path)
-
-            out_name = f'mismatch_{base_name}_attn.png'
-            out_path = os.path.join(save_root, out_name)
-            overlay.save(out_path)
-            logger.info(f'Saved mismatch attention overlay: {out_path}')
-
-            report_items_mismatch.append({
-                'file_path': path,
-                'original_rel': original_name,
-                'heatmap_rel': out_name,
-                'meta': {k: row[k] for k in meta_cols if k in row},
-            })
-
-        # Correct 처리 - 클래스 별로 5개씩 랜덤 샘플링
-        correct_samples = []
-        for label_name in correct_df['pred_label_name'].unique():
-            label_df = correct_df[correct_df['pred_label_name'] == label_name]
-            sample_size = min(5, len(label_df))
-            sampled = label_df.sample(n=sample_size, random_state=42)
-            correct_samples.append(sampled)
-        
-        correct_df_sampled = pd.concat(correct_samples, ignore_index=True) if correct_samples else pd.DataFrame()
-        logger.info(f'Sampled {len(correct_df_sampled)} correct samples (5 per class max)')
-
-        for _, row in correct_df_sampled.iterrows():
-            file_path = row['file_path']
-            if file_path not in path_to_index:
-                logger.warning(f'CSV path not found in dataset list: {file_path}')
+            confidence_cols = [c for c in eval_df.columns if c.startswith('confidence_')]
+            if len(confidence_cols) == 0:
+                logger.warning(f'No confidence_* columns found in CSV {csv_path}. Skipping.')
                 continue
 
-            image_tensor, label, path = dataset[path_to_index[file_path]]
-            image_tensor = image_tensor.to(device)
+            # Mismatch (true_label_name != pred_label_name) 샘플
+            mismatch_df = eval_df[eval_df['true_label_name'] != eval_df['pred_label_name']].copy()
+            logger.info(f'Mismatch samples found: {len(mismatch_df)}')
 
-            with torch.no_grad():
-                outputs = model(image_tensor.unsqueeze(0))
-                probs = torch.softmax(outputs, dim=1)
-                pred = torch.argmax(probs, dim=1).item()
+            # Correct (true_label_name == pred_label_name) 샘플
+            correct_df = eval_df[eval_df['true_label_name'] == eval_df['pred_label_name']].copy()
+            logger.info(f'Correct samples found: {len(correct_df)}')
 
-            attention_map = compute_transformer_attention(model, image_tensor, tuple(args.img_size))
-            original_image = Image.open(path).convert('RGB').resize(tuple(args.img_size))
-            overlay = overlay_attention(original_image, attention_map, alpha=0.5)
+            # 메타 컬럼 선택: true_label_name, pred_label_name, confidence_*
+            meta_cols = ['true_label_name', 'pred_label_name'] + confidence_cols
 
-            base_name = os.path.splitext(os.path.basename(path))[0]
+            report_items_mismatch = []
+            report_items_correct = []
 
-            original_name = f'correct_{base_name}_orig.png'
-            original_path = os.path.join(save_root, original_name)
-            original_image.save(original_path)
+            # Mismatch 처리
+            for _, row in mismatch_df.iterrows():
+                file_path = row['file_path']
+                if file_path not in path_to_index:
+                    logger.warning(f'CSV path not found in dataset list: {file_path}')
+                    continue
 
-            out_name = f'correct_{base_name}_attn.png'
-            out_path = os.path.join(save_root, out_name)
-            overlay.save(out_path)
-            logger.info(f'Saved correct attention overlay: {out_path}')
+                image_tensor, label, path = dataset[path_to_index[file_path]]
+                image_tensor = image_tensor.to(device)
 
-            report_items_correct.append({
-                'file_path': path,
-                'original_rel': original_name,
-                'heatmap_rel': out_name,
-                'meta': {k: row[k] for k in meta_cols if k in row},
-            })
+                with torch.no_grad():
+                    outputs = model(image_tensor.unsqueeze(0))
+                    probs = torch.softmax(outputs, dim=1)
+                    pred = torch.argmax(probs, dim=1).item()
 
-        # CSV별 HTML 리포트 저장
-        report_path = os.path.join(save_root, f'analysis_report_{csv_name}.html')
-        build_html_report(report_path, report_items_mismatch, report_items_correct)
-        logger.info(f'Saved analysis report: {report_path}')
+                attention_map = compute_transformer_attention(model, image_tensor, tuple(args.img_size))
+                original_image = Image.open(path).convert('RGB').resize(tuple(args.img_size))
+                overlay = overlay_attention(original_image, attention_map, alpha=0.5)
+
+                base_name = os.path.splitext(os.path.basename(path))[0]
+
+                original_name = f'mismatch_{base_name}_orig.png'
+                original_path = os.path.join(save_root, original_name)
+                original_image.save(original_path)
+
+                out_name = f'mismatch_{base_name}_attn.png'
+                out_path = os.path.join(save_root, out_name)
+                overlay.save(out_path)
+                logger.info(f'Saved mismatch attention overlay: {out_path}')
+
+                report_items_mismatch.append({
+                    'file_path': path,
+                    'original_rel': original_name,
+                    'heatmap_rel': out_name,
+                    'meta': {k: row[k] for k in meta_cols if k in row},
+                })
+
+            # Correct 처리 - 클래스 별로 5개씩 랜덤 샘플링
+            correct_samples = []
+            for label_name in correct_df['pred_label_name'].unique():
+                label_df = correct_df[correct_df['pred_label_name'] == label_name]
+                sample_size = min(5, len(label_df))
+                sampled = label_df.sample(n=sample_size, random_state=42)
+                correct_samples.append(sampled)
+
+            correct_df_sampled = pd.concat(correct_samples, ignore_index=True) if correct_samples else pd.DataFrame()
+            logger.info(f'Sampled {len(correct_df_sampled)} correct samples (5 per class max)')
+
+            for _, row in correct_df_sampled.iterrows():
+                file_path = row['file_path']
+                if file_path not in path_to_index:
+                    logger.warning(f'CSV path not found in dataset list: {file_path}')
+                    continue
+
+                image_tensor, label, path = dataset[path_to_index[file_path]]
+                image_tensor = image_tensor.to(device)
+
+                with torch.no_grad():
+                    outputs = model(image_tensor.unsqueeze(0))
+                    probs = torch.softmax(outputs, dim=1)
+                    pred = torch.argmax(probs, dim=1).item()
+
+                attention_map = compute_transformer_attention(model, image_tensor, tuple(args.img_size))
+                original_image = Image.open(path).convert('RGB').resize(tuple(args.img_size))
+                overlay = overlay_attention(original_image, attention_map, alpha=0.5)
+
+                base_name = os.path.splitext(os.path.basename(path))[0]
+
+                original_name = f'correct_{base_name}_orig.png'
+                original_path = os.path.join(save_root, original_name)
+                original_image.save(original_path)
+
+                out_name = f'correct_{base_name}_attn.png'
+                out_path = os.path.join(save_root, out_name)
+                overlay.save(out_path)
+                logger.info(f'Saved correct attention overlay: {out_path}')
+
+                report_items_correct.append({
+                    'file_path': path,
+                    'original_rel': original_name,
+                    'heatmap_rel': out_name,
+                    'meta': {k: row[k] for k in meta_cols if k in row},
+                })
+
+            # CSV별 HTML 리포트 저장
+            report_path = os.path.join(save_root, f'analysis_report_{csv_name}.html')
+            build_html_report(report_path, report_items_mismatch, report_items_correct)
+            logger.info(f'Saved analysis report: {report_path}')
 
     logger.info('\n========== Attention visualization finished. ==========')
 
