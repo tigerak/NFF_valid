@@ -83,9 +83,19 @@ class StandardEvalEngine(BaseEngine):
                 images = images.to(self.args.device)
 
                 outputs = model(images)
-                if arcface_module is not None and hasattr(model, '_last_feature'):
+                if arcface_module is not None:
                     # ArcFace checkpoint인 경우 feature->ArcFace logits를 사용한다.
-                    features = F.normalize(model._last_feature, dim=1)
+                    if hasattr(model, 'get_arcface_feature'):
+                        feature_src = model.get_arcface_feature()
+                    elif hasattr(model, '_last_arcface_feature'):
+                        feature_src = model._last_arcface_feature
+                    else:
+                        feature_src = getattr(model, '_last_feature', None)
+
+                    if feature_src is None:
+                        raise RuntimeError('ArcFace evaluation requires arcface feature, but it was not found.')
+
+                    features = F.normalize(feature_src, dim=1)
                     outputs = arcface_module.inference_logits(features)
                 probs = torch.softmax(outputs, dim=1)
                 _, preds = torch.max(outputs, 1)

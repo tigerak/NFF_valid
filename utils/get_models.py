@@ -213,7 +213,7 @@ class TransformerHeadClassifier(nn.Module):
             batch_first=True, # 입력 형태가 (Batch, Seq, Dim) 이므로 True
             norm_first=True, # LayerNorm을 나중에 적용해서 테스트 해볼 것
         )
-        self.transformer_head = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.transformer_head = nn.TransformerEncoder(encoder_layer, num_layers=num_layers, enable_nested_tensor=False)
 
         # 토큰 단위 어텐션 풀링을 위한 경량 학습 투영층
         self.q_proj = nn.Linear(self.embed_dim, self.embed_dim)
@@ -221,6 +221,23 @@ class TransformerHeadClassifier(nn.Module):
 
         # cls_token과 patch_avg 비중을 조절하는 학습 게이트
         self.fusion_logit = nn.Parameter(torch.tensor(0.0))
+
+        # ArcFace 분기 전용 projection 옵션
+        # - focal classifier 경로는 그대로 유지
+        # - arcface_use_projection=True 일 때만 ArcFace 분기 입력을 변환
+        self.arcface_use_projection = bool(getattr(args, 'arcface_use_projection', False))
+        self.arcface_detach_projection_input = bool(getattr(args, 'arcface_detach_projection_input', False))
+        self.arcface_feature_dim = int(getattr(args, 'arcface_feature_dim', self.embed_dim))
+        if self.arcface_use_projection:
+            self.arcface_projection = nn.Sequential(
+                nn.LayerNorm(self.embed_dim),
+                nn.Linear(self.embed_dim, self.embed_dim),
+                nn.GELU(),
+                nn.Linear(self.embed_dim, self.arcface_feature_dim),
+            )
+        else:
+            self.arcface_projection = None
+            self.arcface_feature_dim = self.embed_dim
 
         # Concat 계열 fusion 시 분류기 입력 차원 조정
         if self.token_fusion in ['concat', 'wt_concat']:
@@ -303,8 +320,20 @@ class TransformerHeadClassifier(nn.Module):
 
         # Feature extraction mode: Sub-center ArcFace 등에서 사용
         self._last_feature = combined
+        arcface_input = combined.detach() if self.arcface_detach_projection_input else combined
+        if self.arcface_projection is not None:
+            self._last_arcface_feature = self.arcface_projection(arcface_input)
+        else:
+            self._last_arcface_feature = arcface_input
         
         return self.classifier(combined)
+
+    def get_arcface_feature(self):
+        if hasattr(self, '_last_arcface_feature') and self._last_arcface_feature is not None:
+            return self._last_arcface_feature
+        if hasattr(self, '_last_feature') and self._last_feature is not None:
+            return self._last_feature
+        return None
         
 
     #

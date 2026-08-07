@@ -192,7 +192,7 @@ def run_training(
     sub_center_arcface = None
     if use_sub_center_arcface:
         num_sub_centers = int(getattr(args, 'num_sub_centers', 4))
-        feature_dim = model.embed_dim if hasattr(model, 'embed_dim') else 768
+        feature_dim = int(getattr(model, 'arcface_feature_dim', model.embed_dim if hasattr(model, 'embed_dim') else 768))
         arcface_margin = float(getattr(args, 'arcface_margin', 0.3))
         arcface_scale = float(getattr(args, 'arcface_scale', 64.0))
         sub_center_arcface = losses.SubCenterArcFace(
@@ -467,9 +467,16 @@ def train_one_epoch(model, optimizer, scheduler, dataloader, device, epoch, args
         # ArcFace branch loss (feature space)
         arcface_loss_value = None
         if sub_center_arcface is not None and arcface_weight > 0.0:
-            if hasattr(model, '_last_feature'):
+            if hasattr(model, 'get_arcface_feature'):
+                feature_src = model.get_arcface_feature()
+            elif hasattr(model, '_last_arcface_feature'):
+                feature_src = model._last_arcface_feature
+            else:
+                feature_src = getattr(model, '_last_feature', None)
+
+            if feature_src is not None:
                 try:
-                    features = F.normalize(model._last_feature, dim=1)
+                    features = F.normalize(feature_src, dim=1)
                     arc_a = sub_center_arcface(features, targets_a)
                     if targets_b is not None:
                         arc_b = sub_center_arcface(features, targets_b)
@@ -489,7 +496,7 @@ def train_one_epoch(model, optimizer, scheduler, dataloader, device, epoch, args
             else:
                 if not arcface_fallback_notified:
                     warn_msg = (
-                        f"[경고] Epoch {epoch}: Sub-center ArcFace용 feature(_last_feature) 추출 실패로 "
+                        f"[경고] Epoch {epoch}: Sub-center ArcFace용 feature(_last_arcface_feature/_last_feature) 추출 실패로 "
                         "ArcFace 분기 가중치를 0으로 처리합니다."
                     )
                     print(warn_msg)
@@ -788,13 +795,19 @@ def valid_one_epoch_arcface(model, optimizer, dataloader, device, epoch, num_cla
             batch_size = images.size(0)
 
             # model forward로 최신 feature를 생성한다.
-            # TransformerHeadClassifier는 forward 시 _last_feature를 갱신한다.
             _ = model(images)
-            if not hasattr(model, '_last_feature'):
-                raise RuntimeError('ArcFace validation requires model._last_feature, but it was not found.')
+
+            if hasattr(model, 'get_arcface_feature'):
+                feature_src = model.get_arcface_feature()
+            elif hasattr(model, '_last_arcface_feature'):
+                feature_src = model._last_arcface_feature
+            else:
+                feature_src = getattr(model, '_last_feature', None)
+            if feature_src is None:
+                raise RuntimeError('ArcFace validation requires arcface feature, but it was not found.')
 
             # ArcFace는 cosine 기반이므로 feature 정규화를 명시적으로 유지.
-            features = F.normalize(model._last_feature, dim=1)
+            features = F.normalize(feature_src, dim=1)
             logits = sub_center_arcface.inference_logits(features)
 
             per_sample_loss = torch.nn.functional.cross_entropy(logits, targets, reduction='none')
